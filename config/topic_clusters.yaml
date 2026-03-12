@@ -1,0 +1,61 @@
+clusters:
+  ai-code-review:
+    name: AI Code Review
+    description: AI-powered code review tools, techniques, and best practices
+    pillar_page: /ai-code-review
+    keywords:
+      - ai code review
+      - automated code review
+      - ai pull request review
+      - llm code review
+      - intelligent code review
+
+  code-quality:
+    name: Code Quality
+    description: Code quality measurement, improvement, and enforcement
+    pillar_page: /code-quality
+    keywords:
+      - code quality metrics
+      - code quality tools
+      - technical debt
+      - code maintainability
+
+  pr-workflows:
+    name: PR Workflows
+    description: Pull request processes, automation, and optimization
+    pillar_page: /pr-workflows
+    keywords:
+      - pull request workflow
+      - pr automation
+      - code review process
+      - pr cycle time
+
+  engineering-productivity:
+    name: Engineering Productivity
+    description: Developer productivity, team efficiency, and engineering metrics
+    pillar_page: /engineering-productivity
+    keywords:
+      - developer productivity
+      - engineering metrics
+      - dora metrics
+      - developer experience
+
+  security-in-review:
+    name: Security in Code Review
+    description: Finding and preventing security issues during code review
+    pillar_page: /security-code-review
+    keywords:
+      - security code review
+      - vulnerability detection
+      - secure coding practices
+      - sast tools
+
+  devops-ci-cd:
+    name: DevOps & CI/CD
+    description: CI/CD pipeline optimization and DevOps practices
+    pillar_page: /devops-ci-cd
+    keywords:
+      - ci cd pipeline
+      - continuous integration
+      - deployment automation
+      - devops best practices

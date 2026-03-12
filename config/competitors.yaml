@@ -1,0 +1,36 @@
+competitors:
+  - domain: codeclimate.com
+    name: Code Climate
+    focus: ["code quality", "engineering metrics", "technical debt"]
+    blog_url: https://codeclimate.com/blog
+    key_content: ["velocity metrics", "maintainability", "test coverage"]
+
+  - domain: sonarqube.org
+    name: SonarQube
+    focus: ["static analysis", "code quality", "security"]
+    blog_url: https://blog.sonarsource.com
+    key_content: ["clean code", "security hotspots", "quality gates"]
+
+  - domain: codacy.com
+    name: Codacy
+    focus: ["automated code review", "code quality", "security"]
+    blog_url: https://blog.codacy.com
+    key_content: ["code patterns", "pull request analysis", "quality evolution"]
+
+  - domain: linearb.io
+    name: LinearB
+    focus: ["engineering metrics", "developer productivity", "workflow automation"]
+    blog_url: https://linearb.io/blog
+    key_content: ["gitstream", "cycle time", "developer experience"]
+
+  - domain: gitclear.com
+    name: GitClear
+    focus: ["developer analytics", "code quality metrics", "engineering productivity"]
+    blog_url: https://gitclear.com/blog
+    key_content: ["active code", "code churn", "developer output"]
+
+  - domain: sourcegraph.com
+    name: Sourcegraph
+    focus: ["code search", "code intelligence", "developer tools"]
+    blog_url: https://sourcegraph.com/blog
+    key_content: ["code search", "batch changes", "code intelligence"]
