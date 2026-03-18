@@ -294,7 +294,6 @@ class PipelineOrchestrator:
                     stage_name=stage_name,
                     stage_result=stage_result,
                     ctx=ctx,
-                    result=result if isinstance(result, dict) else {},
                     stage_order=stage_order,
                 )
 
@@ -502,13 +501,12 @@ class PipelineOrchestrator:
         stage_name: str,
         stage_result: StageResult,
         ctx: dict[str, Any],
-        result: dict[str, Any],
         stage_order: list[str],
     ) -> None:
         """Persist the durable checkpoint for a successfully completed stage."""
         if self.journal is None:
             return
-        fragment = _checkpoint_ctx_fragment(stage_name, ctx, result)
+        fragment = _checkpoint_ctx_fragment(stage_name, ctx)
         state = self.journal.load_execution_state()
         attempt = max(1, (state.resume_count if state is not None else 0) + 1)
         self.journal.save_checkpoint(
@@ -2282,6 +2280,8 @@ def _collect_draft_evaluation(
             brief=brief,
             qa_result=qa_result,
             seo_score=seo_score,
+            min_average_score=min_average_score,
+            min_single_score=min_single_score,
         )
 
     provider = orchestrator.providers.content_generation
@@ -2336,6 +2336,8 @@ def _collect_draft_evaluation(
             brief=brief,
             qa_result=qa_result,
             seo_score=seo_score,
+            min_average_score=min_average_score,
+            min_single_score=min_single_score,
         )
 
 
@@ -2441,11 +2443,20 @@ def _normalize_internal_markdown_links(
         markdown_link = f"[{link.anchor_text}]({link.target_path})"
         if markdown_link in repaired:
             continue
-        if raw_url in repaired:
-            repaired = repaired.replace(raw_url, markdown_link)
+        bare_url_pattern = re.compile(
+            rf"(?<!\()(?P<url>{re.escape(raw_url)})(?P<suffix>[.,;:!?])?(?=$|\s|<)"
+        )
+        repaired, replacements = bare_url_pattern.subn(
+            lambda match: f"{markdown_link}{match.group('suffix') or ''}",
+            repaired,
+        )
+        if replacements:
             notes.append(f"Converted bare URL to markdown link for {link.target_path}")
 
-    existing_targets = set(INTERNAL_LINK_PATTERN.findall(repaired))
+    existing_targets = {
+        target.removeprefix("https://macroscope.com").removeprefix("http://macroscope.com")
+        for target in INTERNAL_LINK_PATTERN.findall(repaired)
+    }
     current_count = len(existing_targets)
     if current_count < min_links:
         missing_links = [
@@ -2638,7 +2649,7 @@ def _apply_optimization_patch(
         updated, link_notes = _normalize_internal_markdown_links(
             updated,
             suggestions=patch.internal_link_suggestions,
-            min_links=max(brief.internal_link_suggestions and len(brief.internal_link_suggestions[:3]) or 3, 3),
+            min_links=max(len(brief.internal_link_suggestions) if brief.internal_link_suggestions else 0, 3),
         )
         notes.extend(link_notes)
     return updated, notes
@@ -2805,7 +2816,7 @@ def _ground_article_judge_scores(
     return grounded
 
 
-def _checkpoint_ctx_fragment(stage_name: str, ctx: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def _checkpoint_ctx_fragment(stage_name: str, ctx: dict[str, Any]) -> dict[str, Any]:
     """Build the minimal serialized downstream context for a stage checkpoint."""
     if stage_name == PipelineStage.BOOTSTRAP_RUN.value:
         return {"run_context": ctx["run_context"].model_dump(mode="json")}

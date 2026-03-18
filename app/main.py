@@ -33,6 +33,15 @@ EXIT_FATAL = 2
 EXIT_CONFIG_ERROR = 3
 
 
+def _emit_error(json_output: bool, *, error: str, exit_code: int) -> None:
+    """Emit a CLI error in JSON or rich-console form, then exit."""
+    if json_output:
+        click.echo(json.dumps({"success": False, "error": error}))
+    else:
+        console.print(f"[red]{error}[/red]")
+    sys.exit(exit_code)
+
+
 def _setup_logging(verbose: bool = False, json_mode: bool = False) -> None:
     """Configure logging. Suppresses rich output in JSON mode."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -175,14 +184,12 @@ def score_topics(ctx: click.Context, cluster: str | None, root: Path | None) -> 
     try:
         config = load_config(root=root, json_output=json_output)
     except FileNotFoundError as e:
-        console.print(f"[red]Config error: {e}[/red]")
-        sys.exit(EXIT_CONFIG_ERROR)
+        _emit_error(json_output, error=f"Config error: {e}", exit_code=EXIT_CONFIG_ERROR)
 
     try:
         providers = build_provider_registry(config)
     except ValueError as e:
-        console.print(f"[red]Config error: {e}[/red]")
-        sys.exit(EXIT_CONFIG_ERROR)
+        _emit_error(json_output, error=f"Config error: {e}", exit_code=EXIT_CONFIG_ERROR)
     orchestrator = PipelineOrchestrator(config, providers)
 
     # Run first 3 stages manually
@@ -207,8 +214,7 @@ def score_topics(ctx: click.Context, cluster: str | None, root: Path | None) -> 
         result = orchestrator._score_topics(ctx_data)
         ctx_data.update(result)
     except Exception as e:
-        console.print(f"[red]Scoring failed: {e}[/red]")
-        sys.exit(EXIT_FATAL)
+        _emit_error(json_output, error=f"Scoring failed: {e}", exit_code=EXIT_FATAL)
 
     orchestrator.summary.completed_at = datetime.now(timezone.utc)
     save_run_summary(orchestrator.store, orchestrator.summary)

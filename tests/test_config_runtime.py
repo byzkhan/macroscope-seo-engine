@@ -27,6 +27,20 @@ def test_load_config_reads_openai_settings_from_dotenv(tmp_path: Path, monkeypat
     assert config.openai_model == "gpt-5.1-mini"
 
 
+def test_load_config_ignores_invalid_utf8_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project_root = tmp_path
+    (project_root / "config").mkdir()
+    (project_root / "data").mkdir()
+    (project_root / ".env").write_bytes(b"OPENAI_API_KEY=\xff\xfe")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("SEO_ENGINE_PROVIDER", raising=False)
+
+    config = load_config(root=project_root)
+
+    assert config.openai_api_key is None
+    assert config.provider_mode == "mock"
+
+
 def test_ensure_live_run_provider_rejects_mock_fallback(tmp_path: Path):
     project_root = tmp_path
     (project_root / "config").mkdir()

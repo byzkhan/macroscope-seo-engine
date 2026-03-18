@@ -269,7 +269,7 @@ def append_to_topic_history(
 
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
-    tmp_path.rename(path)
+    tmp_path.replace(path)
 
 
 def save_run_summary(store: RunStore, summary: RunSummary) -> Path:

@@ -102,7 +102,7 @@ class ScheduleSettings(BaseModel):
     """Persisted daily schedule for the dashboard."""
 
     enabled: bool = False
-    daily_time: str = Field(default="09:00", pattern=r"^\d{2}:\d{2}$")
+    daily_time: str = Field(default="09:00", pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 def _utc_now_iso() -> str:
@@ -134,8 +134,11 @@ def _read_events(run_dir: Path) -> list[dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
-            events.append(json.loads(line))
-    except (OSError, json.JSONDecodeError):
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
         return []
     return events
 
@@ -729,9 +732,15 @@ class DashboardRunManager:
         """Resolve a run artifact path and ensure it exists."""
         run_dir = self.data_dir / "runs" / run_id
         path = run_dir / artifact_name
-        if not path.exists() or not path.is_file():
+        try:
+            resolved_run_dir = run_dir.resolve()
+            resolved = path.resolve()
+            resolved.relative_to(resolved_run_dir)
+        except (OSError, RuntimeError, ValueError):
             raise FileNotFoundError(f"Artifact '{artifact_name}' not found for run '{run_id}'")
-        return path
+        if not resolved.exists() or not resolved.is_file():
+            raise FileNotFoundError(f"Artifact '{artifact_name}' not found for run '{run_id}'")
+        return resolved
 
     def _sync_schedule_job(self, settings: ScheduleSettings | None = None) -> None:
         settings = settings or ScheduleSettings.model_validate(
@@ -827,6 +836,8 @@ class DashboardRunManager:
 
     def _launch_worker(self, command: str, run_id: str) -> ProcessHandle:
         """Launch a durable subprocess for a fresh or resumed run."""
+        if psutil is None:
+            raise RuntimeError("psutil is required for durable dashboard workers.")
         args = [
             sys.executable,
             "-m",
@@ -844,8 +855,6 @@ class DashboardRunManager:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        if psutil is None:
-            raise RuntimeError("psutil is required for durable dashboard workers.")
         worker = psutil.Process(process.pid)
         return ProcessHandle(pid=process.pid, create_time=worker.create_time())
 

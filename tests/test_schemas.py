@@ -279,6 +279,7 @@ class TestResearchBrief:
             claims_needing_evidence=["reduces review time"],
             internal_link_suggestions=[
                 InternalLink(anchor_text="AI code review", target_path="/ai-code-review", context="intro"),
+                InternalLink(anchor_text="PR workflow", target_path="/pr-workflow", context="body"),
             ],
             cta="Try Macroscope free today",
             do_not_say=["revolutionary"],
@@ -301,8 +302,11 @@ class TestResearchBrief:
                 secondary_keywords=["s1", "s2"],
                 entities=["E"],
                 faqs=[FAQ(question="Only one question here?", suggested_answer="Only one answer here for testing.")],
-                claims_needing_evidence=[],
-                internal_link_suggestions=[],
+            claims_needing_evidence=[],
+            internal_link_suggestions=[
+                InternalLink(anchor_text="Guide", target_path="/guide", context="intro"),
+                InternalLink(anchor_text="FAQ", target_path="/faq", context="faq"),
+            ],
                 cta="Try it now please",
                 do_not_say=["x"],
                 meta_description="Meta description that has enough length for validation to pass.",
@@ -326,7 +330,10 @@ class TestResearchBrief:
                 for i in range(4)
             ],
             claims_needing_evidence=[],
-            internal_link_suggestions=[],
+            internal_link_suggestions=[
+                InternalLink(anchor_text="Guide", target_path="/guide", context="intro"),
+                InternalLink(anchor_text="FAQ", target_path="/faq", context="faq"),
+            ],
             cta="Try it today",
             do_not_say=["x"],
             meta_description="Meta description that has enough length for validation to pass.",

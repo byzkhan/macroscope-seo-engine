@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from statistics import mean
 
 from .schemas import (
@@ -44,7 +45,7 @@ def merge_market_signal_reports(reports: list[MarketSignalReport]) -> MarketSign
         )[:18],
         trending_themes=trending_themes[:8],
         recommended_angles=recommended_angles[:8],
-        collected_at=collected_at,
+        collected_at=collected_at or datetime.now(timezone.utc),
     )
 
 

@@ -16,6 +16,7 @@ from app.orchestrator import (
     PipelineOrchestrator,
     _apply_optimization_patch,
     _collect_article_jury_scores,
+    _normalize_internal_markdown_links,
     _should_unlock_second_draft,
 )
 from app.providers import MockContentGenerationProvider, ProviderRegistry
@@ -468,3 +469,20 @@ def test_openai_web_search_is_reserved_for_research_and_fact_check(tmp_path, mon
         for operation, use_web_search in calls
         if operation not in {"collect_market_signals", "fact_check_claims"}
     )
+
+
+def test_normalize_internal_links_does_not_duplicate_absolute_macroscope_links():
+    repaired, notes = _normalize_internal_markdown_links(
+        "See [Guide](https://macroscope.com/blog/guide) for more context.",
+        suggestions=[
+            InternalLink(anchor_text="Guide", target_path="/blog/guide", context="intro"),
+            InternalLink(anchor_text="Benchmarks", target_path="/blog/benchmarks", context="body"),
+            InternalLink(anchor_text="FAQ", target_path="/blog/faq", context="faq"),
+        ],
+        min_links=3,
+    )
+
+    assert repaired.count("[Guide](https://macroscope.com/blog/guide)") == 1
+    assert "[Guide]([Guide](/blog/guide))" not in repaired
+    assert repaired.count("(/blog/guide)") == 0
+    assert any("internal-links section" in note.lower() for note in notes)

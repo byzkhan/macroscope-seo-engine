@@ -53,7 +53,7 @@ class ScheduleRequest(BaseModel):
     """Payload for daily scheduling from the UI."""
 
     enabled: bool
-    daily_time: str = Field(pattern=r"^\d{2}:\d{2}$")
+    daily_time: str = Field(pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 @app.get("/", response_class=HTMLResponse)

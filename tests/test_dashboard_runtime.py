@@ -3,7 +3,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.dashboard_runtime import DashboardRunManager, build_stage_views
+import pytest
+from pydantic import ValidationError
+
+from app.dashboard_runtime import DashboardRunManager, ScheduleSettings, _read_events, build_stage_views
 from app.schemas import ExecutionState, StageResult
 from app.storage import ExecutionJournal, RunStore
 
@@ -153,6 +156,32 @@ def test_dashboard_manager_marks_incomplete_runs_as_interrupted(tmp_path: Path):
     assert detail["summary"]["errors"]
 
 
+def test_read_events_keeps_valid_lines_when_one_line_is_bad(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                '{"event":"run_started","run_id":"run-1"}',
+                '{"event": invalid json}',
+                '{"event":"stage_completed","stage":"bootstrap_run"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    events = _read_events(run_dir)
+
+    assert len(events) == 2
+    assert events[0]["event"] == "run_started"
+    assert events[1]["event"] == "stage_completed"
+
+
+def test_schedule_settings_reject_invalid_time_values():
+    with pytest.raises(ValidationError):
+        ScheduleSettings(enabled=True, daily_time="25:99")
+
+
 def test_dashboard_manager_flags_legacy_incomplete_runs_as_not_resumable(tmp_path: Path):
     project_root = tmp_path
     run_dir = project_root / "data" / "runs" / "run-legacy"
@@ -225,3 +254,16 @@ def test_dashboard_manager_resume_run_uses_checkpointed_stage(tmp_path: Path, mo
     assert status["active_run_id"] == "run-resume"
     assert detail["status"] == "resuming"
     assert detail["resume_stage"] == "score_topics"
+
+
+def test_dashboard_manager_rejects_path_traversal_for_artifacts(tmp_path: Path):
+    project_root = tmp_path
+    run_dir = project_root / "data" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    outside = project_root / "secret.txt"
+    outside.write_text("nope", encoding="utf-8")
+
+    manager = DashboardRunManager(project_root)
+
+    with pytest.raises(FileNotFoundError):
+        manager.resolve_artifact_path("run-1", "../../secret.txt")

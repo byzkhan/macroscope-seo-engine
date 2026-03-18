@@ -296,7 +296,7 @@ class ResearchBrief(BaseModel):
     entities: list[str] = Field(..., min_length=1, description="People, companies, tools, concepts")
     faqs: list[FAQ] = Field(..., min_length=4)
     claims_needing_evidence: list[str]
-    internal_link_suggestions: list[InternalLink]
+    internal_link_suggestions: list[InternalLink] = Field(..., min_length=2)
     cta: str = Field(..., min_length=5)
     do_not_say: list[str] = Field(..., min_length=1)
     meta_description: str = Field(..., min_length=50, max_length=160)

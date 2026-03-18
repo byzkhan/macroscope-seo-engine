@@ -26,7 +26,7 @@ def _write_json_list(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
-    tmp_path.rename(path)
+    tmp_path.replace(path)
 
 
 def load_topic_cooldowns(data_dir: Path) -> list[TopicCooldownRecord]:

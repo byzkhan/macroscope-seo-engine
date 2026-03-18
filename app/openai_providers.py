@@ -296,7 +296,7 @@ class OpenAIProviderBase:
             response=response,
             web_search_used=use_web_search and self.config.openai_enable_web_search,
         )
-        output_text = getattr(response, "output_text", "").strip()
+        output_text = (getattr(response, "output_text", "") or "").strip()
         if not output_text:
             raise ValueError("OpenAI response did not contain text output")
         return output_text
@@ -451,8 +451,22 @@ class OpenAIContentGenerationProvider(OpenAIProviderBase, ContentGenerationProvi
         prompt: str,
         market_signals: MarketSignalReport,
     ) -> list[TopicCandidate]:
+        signal_context = {
+            "trending_themes": market_signals.trending_themes[:8],
+            "recommended_angles": market_signals.recommended_angles[:8],
+            "signals": [
+                {
+                    "source": signal.source,
+                    "title": signal.title,
+                    "summary": signal.summary,
+                    "themes": signal.themes,
+                }
+                for signal in market_signals.signals[:12]
+            ],
+        }
         wrapped_prompt = (
             f"{prompt}\n\n"
+            f"Market signals:\n{json.dumps(signal_context, indent=2, ensure_ascii=True)}\n\n"
             "Use only the provided research packet and signals. Do not browse the web.\n"
             "Return an object with a single key `topics` containing the topic list."
         )
@@ -674,7 +688,12 @@ class OpenAIContentGenerationProvider(OpenAIProviderBase, ContentGenerationProvi
         manifest: ArticleManifest,
     ) -> FactCheckReport:
         cache_key = json.dumps(
-            {"slug": manifest.slug, "claims": manifest.claim_candidates, "headings": manifest.heading_map},
+            {
+                "slug": manifest.slug,
+                "claims": manifest.claim_candidates,
+                "headings": manifest.heading_map,
+                "prompt": prompt,
+            },
             sort_keys=True,
         )
         cached = self._load_cache("fact_check", cache_key)

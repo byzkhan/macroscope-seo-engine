@@ -107,6 +107,8 @@ def evaluate_draft_variant(
     brief: ResearchBrief,
     qa_result: QAResult,
     seo_score: SEOAEOScore,
+    min_average_score: float = 8.2,
+    min_single_score: float = 7.4,
 ) -> DraftEvaluation:
     """Score one writer draft before optimization."""
     content_lower = variant.content_md.lower()
@@ -148,9 +150,9 @@ def evaluate_draft_variant(
     min_score = round(min(values), 2)
     score_variance = round(pvariance(values), 3) if len(values) > 1 else 0.0
     notes: list[str] = []
-    if average_score < 8.2:
+    if average_score < min_average_score:
         notes.append("Draft needs stronger optimization before publication")
-    if min_score < 7.4:
+    if min_score < min_single_score:
         notes.append("At least one quality dimension is too weak")
     return DraftEvaluation(
         writer_id=variant.writer_id,
@@ -158,7 +160,7 @@ def evaluate_draft_variant(
         average_score=average_score,
         min_score=min_score,
         score_variance=score_variance,
-        passed=average_score >= 8.2 and min_score >= 7.4,
+        passed=average_score >= min_average_score and min_score >= min_single_score,
         notes=notes,
     )
 
