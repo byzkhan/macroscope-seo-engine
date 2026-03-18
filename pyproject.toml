@@ -17,7 +17,13 @@ dependencies = [
     "httpx>=0.25",
     "tenacity>=8.2",
     "python-slugify>=8.0",
+    "openai>=2.26.0",
     "anthropic>=0.40",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "jinja2>=3.1",
+    "apscheduler>=3.10",
+    "psutil>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -46,3 +52,6 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
 python_version = "3.9"
 strict = true
 plugins = ["pydantic.mypy"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

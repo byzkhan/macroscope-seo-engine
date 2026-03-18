@@ -47,8 +47,96 @@ class EngineConfig:
     max_word_count: int = 4000
     min_internal_links: int = 3
     min_faq_count: int = 4
+    research_lookback_days: int = 14
+    topic_cooldown_days: int = 45
+    min_topic_consensus_score: float = 7.2
+    min_topic_authority_score: float = 7.5
+    min_brief_quality_score: float = 8.0
+    min_draft_quality_score: float = 8.2
+    final_jury_average_threshold: float = 9.0
+    final_jury_min_threshold: float = 8.0
+    technical_accuracy_threshold: float = 9.0
+    topic_judge_spread_threshold: float = 1.5
+    topic_judge_variance_threshold: float = 0.7
+    draft_judge_spread_threshold: float = 1.4
+    draft_judge_variance_threshold: float = 0.6
+    final_judge_spread_threshold: float = 1.2
+    final_judge_variance_threshold: float = 0.45
+    optimizer_max_rounds: int = 0
+    max_topic_candidates: int = 12
+    model_judged_topics: int = 6
+    full_panel_topics: int = 2
+    writer_blueprints: int = 3
+    full_draft_candidates: int = 1
+    second_draft_unlock_round: int = 4
+    enable_final_fact_check: bool = True
+    web_search_stages: list[str] = field(default_factory=lambda: ["research", "fact_check"])
+    writer_personas: list[str] = field(default_factory=lambda: ["technical", "pragmatic", "analytical"])
+    optimizer_personas: list[str] = field(default_factory=lambda: ["seo", "aeo", "clarity", "technical_accuracy"])
     dry_run: bool = False
     json_output: bool = False
+    provider_mode: str = "mock"
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_model: str = "gpt-5-mini"
+    openai_market_model: str = "gpt-5-mini"
+    openai_content_model: str = "gpt-5-mini"
+    openai_reasoning_effort: str = "medium"
+    openai_enable_web_search: bool = True
+    openai_search_context_size: str = "medium"
+    openai_timeout_seconds: float = 120.0
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_dotenv(path: Path) -> dict[str, str]:
+    """Load a simple .env file without overriding existing process env."""
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            values[key] = value
+    except OSError:
+        return {}
+    return values
+
+
+def _env_value(name: str, dotenv_values: dict[str, str], default: str | None = None) -> str | None:
+    """Read a setting from process env first, then .env, then default."""
+    return os.getenv(name, dotenv_values.get(name, default))
+
+
+def _env_bool_with_dotenv(name: str, dotenv_values: dict[str, str], default: bool) -> bool:
+    value = _env_value(name, dotenv_values)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_list_with_dotenv(name: str, dotenv_values: dict[str, str], default: str) -> list[str]:
+    value = _env_value(name, dotenv_values, default) or default
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _load_yaml(path: Path) -> Any:
@@ -81,10 +169,14 @@ def load_config(
     root = root or _project_root()
     config_dir = root / "config"
     data_dir = root / "data"
+    dotenv_values = _load_dotenv(root / ".env")
 
     competitors_data = _load_yaml(config_dir / "competitors.yaml")
     clusters_data = _load_yaml(config_dir / "topic_clusters.yaml")
     forbidden_data = _load_yaml(config_dir / "forbidden_claims.yaml")
+    openai_api_key = _env_value("OPENAI_API_KEY", dotenv_values)
+    provider_mode = _env_value("SEO_ENGINE_PROVIDER", dotenv_values) or ("openai" if openai_api_key else "mock")
+    openai_model = _env_value("OPENAI_MODEL", dotenv_values, "gpt-5-mini") or "gpt-5-mini"
 
     return EngineConfig(
         project_root=root,
@@ -98,6 +190,67 @@ def load_config(
         topic_clusters=clusters_data,
         forbidden_claims=forbidden_data.get("forbidden_claims", []),
         requires_evidence=forbidden_data.get("requires_evidence", []),
+        research_lookback_days=int(_env_value("RESEARCH_LOOKBACK_DAYS", dotenv_values, "14") or "14"),
+        topic_cooldown_days=int(_env_value("TOPIC_COOLDOWN_DAYS", dotenv_values, "45") or "45"),
+        min_topic_consensus_score=float(_env_value("MIN_TOPIC_CONSENSUS_SCORE", dotenv_values, "7.2") or "7.2"),
+        min_topic_authority_score=float(_env_value("MIN_TOPIC_AUTHORITY_SCORE", dotenv_values, "7.5") or "7.5"),
+        min_brief_quality_score=float(_env_value("MIN_BRIEF_QUALITY_SCORE", dotenv_values, "8.0") or "8.0"),
+        min_draft_quality_score=float(_env_value("MIN_DRAFT_QUALITY_SCORE", dotenv_values, "8.2") or "8.2"),
+        final_jury_average_threshold=float(_env_value("FINAL_JURY_AVERAGE_THRESHOLD", dotenv_values, "9.0") or "9.0"),
+        final_jury_min_threshold=float(_env_value("FINAL_JURY_MIN_THRESHOLD", dotenv_values, "8.0") or "8.0"),
+        technical_accuracy_threshold=float(_env_value("TECHNICAL_ACCURACY_THRESHOLD", dotenv_values, "9.0") or "9.0"),
+        topic_judge_spread_threshold=float(_env_value("TOPIC_JUDGE_SPREAD_THRESHOLD", dotenv_values, "1.5") or "1.5"),
+        topic_judge_variance_threshold=float(_env_value("TOPIC_JUDGE_VARIANCE_THRESHOLD", dotenv_values, "0.7") or "0.7"),
+        draft_judge_spread_threshold=float(_env_value("DRAFT_JUDGE_SPREAD_THRESHOLD", dotenv_values, "1.4") or "1.4"),
+        draft_judge_variance_threshold=float(_env_value("DRAFT_JUDGE_VARIANCE_THRESHOLD", dotenv_values, "0.6") or "0.6"),
+        final_judge_spread_threshold=float(_env_value("FINAL_JUDGE_SPREAD_THRESHOLD", dotenv_values, "1.2") or "1.2"),
+        final_judge_variance_threshold=float(_env_value("FINAL_JUDGE_VARIANCE_THRESHOLD", dotenv_values, "0.45") or "0.45"),
+        optimizer_max_rounds=int(_env_value("OPTIMIZER_MAX_ROUNDS", dotenv_values, "0") or "0"),
+        max_topic_candidates=int(_env_value("MAX_TOPIC_CANDIDATES", dotenv_values, "12") or "12"),
+        model_judged_topics=int(_env_value("MODEL_JUDGED_TOPICS", dotenv_values, "6") or "6"),
+        full_panel_topics=int(_env_value("FULL_PANEL_TOPICS", dotenv_values, "2") or "2"),
+        writer_blueprints=int(_env_value("WRITER_BLUEPRINTS", dotenv_values, "3") or "3"),
+        full_draft_candidates=int(_env_value("FULL_DRAFT_CANDIDATES", dotenv_values, "1") or "1"),
+        second_draft_unlock_round=int(_env_value("SECOND_DRAFT_UNLOCK_ROUND", dotenv_values, "4") or "4"),
+        enable_final_fact_check=_env_bool_with_dotenv("ENABLE_FINAL_FACT_CHECK", dotenv_values, True),
+        web_search_stages=_env_list_with_dotenv("WEB_SEARCH_STAGES", dotenv_values, "research,fact_check"),
+        writer_personas=[
+            persona.strip()
+            for persona in (_env_value("WRITER_PERSONAS", dotenv_values, "technical,pragmatic,analytical") or "technical,pragmatic,analytical").split(",")
+            if persona.strip()
+        ],
+        optimizer_personas=[
+            persona.strip()
+            for persona in (_env_value("OPTIMIZER_PERSONAS", dotenv_values, "seo,aeo,clarity,technical_accuracy") or "seo,aeo,clarity,technical_accuracy").split(",")
+            if persona.strip()
+        ],
         dry_run=dry_run,
         json_output=json_output,
+        provider_mode=provider_mode.lower().strip(),
+        openai_api_key=openai_api_key,
+        openai_base_url=_env_value("OPENAI_BASE_URL", dotenv_values),
+        openai_model=openai_model,
+        openai_market_model=_env_value("OPENAI_MARKET_MODEL", dotenv_values, openai_model) or openai_model,
+        openai_content_model=_env_value("OPENAI_CONTENT_MODEL", dotenv_values, openai_model) or openai_model,
+        openai_reasoning_effort=_env_value("OPENAI_REASONING_EFFORT", dotenv_values, "medium") or "medium",
+        openai_enable_web_search=_env_bool_with_dotenv("OPENAI_ENABLE_WEB_SEARCH", dotenv_values, True),
+        openai_search_context_size=_env_value("OPENAI_SEARCH_CONTEXT_SIZE", dotenv_values, "medium") or "medium",
+        openai_timeout_seconds=float(_env_value("OPENAI_TIMEOUT_SECONDS", dotenv_values, "120") or "120"),
+    )
+
+
+def ensure_live_run_provider(config: EngineConfig, *, context: str) -> None:
+    """Reject silent mock fallbacks for real pipeline runs."""
+    if config.dry_run:
+        return
+    if config.provider_mode == "openai":
+        if not config.openai_api_key:
+            raise ValueError(
+                f"{context} requires OPENAI_API_KEY when provider mode is openai."
+            )
+        return
+    raise ValueError(
+        f"{context} resolved to provider_mode='{config.provider_mode}'. "
+        "Real runs must use OpenAI. Set OPENAI_API_KEY in the environment or project .env. "
+        "If you intentionally want mock mode for testing, set SEO_ENGINE_PROVIDER=mock explicitly."
     )

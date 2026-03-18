@@ -8,6 +8,7 @@ and keyword overlap.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -53,7 +54,8 @@ def _load_archive(archive_path: Path) -> list[dict]:
 def _word_set(text: str) -> set[str]:
     """Extract meaningful words (>2 chars) from text as a lowercase set."""
     stopwords = {"the", "and", "for", "with", "how", "that", "this", "your", "from", "are", "was"}
-    return {w for w in text.lower().split() if len(w) > 2 and w not in stopwords}
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return {token for token in tokens if len(token) > 2 and token not in stopwords}
 
 
 def check_archive_similarity(
@@ -173,7 +175,15 @@ def score_topic(
 
 def rank_topics(scored: list[ScoredTopic]) -> list[ScoredTopic]:
     """Rank scored topics by total score, descending."""
-    return sorted(scored, key=lambda s: s.total_score, reverse=True)
+    return sorted(
+        scored,
+        key=lambda s: (
+            s.consensus_score if s.consensus_score is not None else (s.total_score / 10.0),
+            -len(s.rejection_reasons),
+            s.total_score,
+        ),
+        reverse=True,
+    )
 
 
 def select_best(scored: list[ScoredTopic]) -> Optional[ScoredTopic]:

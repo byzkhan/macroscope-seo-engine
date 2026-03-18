@@ -8,8 +8,38 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from .schemas import SEOAEOScore
+
+
+def normalize_markdown_headings(content: str) -> str:
+    """Convert setext-style markdown headings into ATX headings for analysis."""
+    lines = content.splitlines()
+    normalized: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        current = lines[index].rstrip()
+        if index + 1 < len(lines):
+            underline = lines[index + 1].strip()
+            if (
+                current
+                and not current.lstrip().startswith(("#", "-", "*", ">", "`"))
+                and len(underline) >= 3
+                and set(underline) <= {"=", "-"}
+            ):
+                level = "#" if "=" in underline else "##"
+                normalized.append(f"{level} {current.strip()}")
+                index += 2
+                continue
+        normalized.append(lines[index])
+        index += 1
+
+    result = "\n".join(normalized)
+    if content.endswith("\n"):
+        result += "\n"
+    return result
 
 
 @dataclass
@@ -76,6 +106,7 @@ def check_word_count(content: str, min_words: int = 800, max_words: int = 4000) 
 
 def check_has_faq_section(content: str) -> QACheck:
     """Verify the article contains a FAQ section."""
+    content = normalize_markdown_headings(content)
     pattern = r"^#{1,3}\s.*(?:FAQ|Frequently\s+Asked|Common\s+Questions)"
     has_faq = bool(re.search(pattern, content, re.MULTILINE | re.IGNORECASE))
     return QACheck(
@@ -91,6 +122,7 @@ def check_has_direct_answer(content: str) -> QACheck:
     Looks for at least two sentence-ending punctuation marks in the first
     ~500 characters after the first heading.
     """
+    content = normalize_markdown_headings(content)
     match = re.search(r"^#\s+.+\n(.{100,600})", content, re.MULTILINE | re.DOTALL)
     if match:
         intro = match.group(1).strip()
@@ -125,6 +157,7 @@ def check_meta_description(meta: str) -> QACheck:
 
 def check_heading_structure(content: str) -> QACheck:
     """Verify proper heading hierarchy without level jumps >1."""
+    content = normalize_markdown_headings(content)
     headings = re.findall(r"^(#{1,6})\s+", content, re.MULTILINE)
     if not headings:
         return QACheck(name="heading_structure", passed=False, message="No headings found")
@@ -224,6 +257,7 @@ def score_seo_aeo(
     Each dimension is scored 0-10, total 0-100.
     Uses heuristic analysis — not a substitute for real SERP data.
     """
+    content = normalize_markdown_headings(content)
     content_lower = content.lower()
     keyword_lower = primary_keyword.lower()
     words = content_lower.split()
@@ -296,7 +330,7 @@ def score_seo_aeo(
         depth_score = 3.0
 
     # --- Freshness signals score ---
-    current_year = "2026"
+    current_year = str(datetime.now(timezone.utc).year)
     has_year = current_year in content
     freshness_words = ["latest", "recently", "new", "updated", current_year]
     has_freshness = any(w in content_lower for w in freshness_words)
@@ -332,15 +366,16 @@ def run_qa(
     min_internal_links: int = 2,
 ) -> QAResult:
     """Run the full QA suite on an article."""
+    normalized_content = normalize_markdown_headings(content)
     checks = [
-        check_word_count(content, min_word_count, max_word_count),
-        check_has_faq_section(content),
-        check_has_direct_answer(content),
+        check_word_count(normalized_content, min_word_count, max_word_count),
+        check_has_faq_section(normalized_content),
+        check_has_direct_answer(normalized_content),
         check_meta_description(meta_description),
-        check_heading_structure(content),
-        check_internal_links(content, min_internal_links),
+        check_heading_structure(normalized_content),
+        check_internal_links(normalized_content, min_internal_links),
         check_slug(slug),
-        check_forbidden_claims(content, forbidden_claims or []),
-        check_do_not_say(content, do_not_say or []),
+        check_forbidden_claims(normalized_content, forbidden_claims or []),
+        check_do_not_say(normalized_content, do_not_say or []),
     ]
     return QAResult(checks=checks)

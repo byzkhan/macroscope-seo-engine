@@ -11,22 +11,40 @@ Integration points for MCP or direct APIs are documented inline.
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .schemas import (
-    DraftArticle,
+    ArticleManifest,
+    BriefClaimsPlan,
+    BriefEntityPlan,
+    BriefFAQPlan,
+    BriefLinkPlan,
+    BriefOutlinePlan,
+    BlueprintSection,
+    FactCheckReport,
+    FAQ,
     FinalArticle,
+    InternalLink,
+    JudgeScore,
     MarketSignal,
     MarketSignalReport,
+    OptimizationPatch,
+    OutlineSection,
+    ResearchPacket,
     ResearchBrief,
     ScoredTopic,
     SearchIntent,
     TopicCandidate,
+    WriterBlueprint,
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .config import EngineConfig
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +62,12 @@ class MarketSignalProvider(ABC):
     """
 
     @abstractmethod
-    def collect(self, themes: list[str], lookback_days: int = 14) -> MarketSignalReport:
+    def collect(
+        self,
+        themes: list[str],
+        lookback_days: int = 14,
+        prompt: str | None = None,
+    ) -> MarketSignalReport:
         """Collect market signals for the given themes."""
         ...
 
@@ -52,7 +75,12 @@ class MarketSignalProvider(ABC):
 class MockMarketSignalProvider(MarketSignalProvider):
     """Returns realistic synthetic market signals for pipeline testing."""
 
-    def collect(self, themes: list[str], lookback_days: int = 14) -> MarketSignalReport:
+    def collect(
+        self,
+        themes: list[str],
+        lookback_days: int = 14,
+        prompt: str | None = None,
+    ) -> MarketSignalReport:
         now = datetime.now(timezone.utc)
         signals = [
             MarketSignal(
@@ -292,6 +320,64 @@ class ContentGenerationProvider(ABC):
         ...
 
     @abstractmethod
+    def generate_brief_outline(self, prompt: str, topic: ScoredTopic) -> BriefOutlinePlan:
+        """Generate the outline/title specialist output for a selected topic."""
+        ...
+
+    @abstractmethod
+    def generate_brief_entities(self, prompt: str, topic: ScoredTopic) -> BriefEntityPlan:
+        """Generate the keyword/entity specialist output for a selected topic."""
+        ...
+
+    @abstractmethod
+    def generate_brief_faqs(self, prompt: str, topic: ScoredTopic) -> BriefFAQPlan:
+        """Generate the FAQ specialist output for a selected topic."""
+        ...
+
+    @abstractmethod
+    def generate_brief_links(self, prompt: str, topic: ScoredTopic) -> BriefLinkPlan:
+        """Generate the internal-link/CTA specialist output for a selected topic."""
+        ...
+
+    @abstractmethod
+    def generate_brief_claims(self, prompt: str, topic: ScoredTopic) -> BriefClaimsPlan:
+        """Generate the evidence and risk specialist output for a selected topic."""
+        ...
+
+    @abstractmethod
+    def generate_brief_bundle(
+        self,
+        prompt: str,
+        topic: ScoredTopic,
+        research_packet: ResearchPacket,
+    ) -> ResearchBrief:
+        """Generate the full brief in one bundled call."""
+        ...
+
+    @abstractmethod
+    def generate_writer_blueprint(
+        self,
+        prompt: str,
+        brief: ResearchBrief,
+        research_packet: ResearchPacket,
+        writer_id: str,
+        writer_label: str,
+    ) -> WriterBlueprint:
+        """Generate a low-token article blueprint for one writer persona."""
+        ...
+
+    @abstractmethod
+    def generate_draft_from_blueprint(
+        self,
+        prompt: str,
+        brief: ResearchBrief,
+        blueprint: WriterBlueprint,
+        research_packet: ResearchPacket,
+    ) -> str:
+        """Generate a full draft using a selected blueprint."""
+        ...
+
+    @abstractmethod
     def generate_draft(self, prompt: str, brief: ResearchBrief) -> str:
         """Generate a draft article from a brief. Returns markdown."""
         ...
@@ -299,6 +385,35 @@ class ContentGenerationProvider(ABC):
     @abstractmethod
     def optimize_draft(self, prompt: str, draft: str) -> str:
         """SEO/AEO optimize a draft. Returns improved markdown."""
+        ...
+
+    @abstractmethod
+    def optimize_sections(
+        self,
+        prompt: str,
+        content: str,
+        manifest: ArticleManifest,
+    ) -> OptimizationPatch:
+        """Return a structured optimization patch instead of rewriting the full article."""
+        ...
+
+    @abstractmethod
+    def judge_topic(self, prompt: str, topic: ScoredTopic, judge_name: str) -> JudgeScore:
+        """Score a topic candidate from the perspective of one judge."""
+        ...
+
+    @abstractmethod
+    def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
+        """Score a draft or final article from the perspective of one judge."""
+        ...
+
+    @abstractmethod
+    def fact_check_claims(
+        self,
+        prompt: str,
+        manifest: ArticleManifest,
+    ) -> FactCheckReport:
+        """Run a final fact-check over the compact article manifest."""
         ...
 
 
@@ -319,13 +434,160 @@ class MockContentGenerationProvider(ContentGenerationProvider):
         """Return a complete mock research brief."""
         return _mock_research_brief(topic.candidate)
 
+    def generate_brief_outline(self, prompt: str, topic: ScoredTopic) -> BriefOutlinePlan:
+        brief = _mock_research_brief(topic.candidate)
+        return BriefOutlinePlan(
+            outline=brief.outline,
+            target_word_count=brief.target_word_count,
+            title_options=brief.title_options,
+        )
+
+    def generate_brief_entities(self, prompt: str, topic: ScoredTopic) -> BriefEntityPlan:
+        brief = _mock_research_brief(topic.candidate)
+        return BriefEntityPlan(
+            primary_keyword=brief.primary_keyword,
+            secondary_keywords=brief.secondary_keywords,
+            entities=brief.entities,
+            meta_description=brief.meta_description,
+        )
+
+    def generate_brief_faqs(self, prompt: str, topic: ScoredTopic) -> BriefFAQPlan:
+        brief = _mock_research_brief(topic.candidate)
+        return BriefFAQPlan(faqs=brief.faqs)
+
+    def generate_brief_links(self, prompt: str, topic: ScoredTopic) -> BriefLinkPlan:
+        brief = _mock_research_brief(topic.candidate)
+        return BriefLinkPlan(
+            internal_link_suggestions=brief.internal_link_suggestions,
+            cta=brief.cta,
+        )
+
+    def generate_brief_claims(self, prompt: str, topic: ScoredTopic) -> BriefClaimsPlan:
+        brief = _mock_research_brief(topic.candidate)
+        return BriefClaimsPlan(
+            claims_needing_evidence=brief.claims_needing_evidence,
+            do_not_say=brief.do_not_say,
+        )
+
+    def generate_brief_bundle(
+        self,
+        prompt: str,
+        topic: ScoredTopic,
+        research_packet: ResearchPacket,
+    ) -> ResearchBrief:
+        return _mock_research_brief(topic.candidate)
+
+    def generate_writer_blueprint(
+        self,
+        prompt: str,
+        brief: ResearchBrief,
+        research_packet: ResearchPacket,
+        writer_id: str,
+        writer_label: str,
+    ) -> WriterBlueprint:
+        return WriterBlueprint(
+            writer_id=writer_id,
+            writer_label=writer_label,
+            focus_summary=f"Mock blueprint for {writer_label}",
+            title=brief.title_options[0],
+            opening_hook=f"{brief.primary_keyword} matters because review teams need repeatable, technical signals before rollout.",
+            direct_answer=f"Direct answer: {brief.primary_keyword} works when teams benchmark it on real pull requests, integrate it into CI, and keep humans on high-risk paths.",
+            sections=[
+                BlueprintSection(
+                    heading=section.heading,
+                    bullets=section.key_points or [section.description],
+                    claims_to_support=brief.claims_needing_evidence[:2],
+                )
+                for section in brief.outline
+            ],
+            faq_plan=[faq.question for faq in brief.faqs],
+            internal_link_targets=[link.target_path for link in brief.internal_link_suggestions],
+            claims_plan=brief.claims_needing_evidence,
+            estimated_word_count=brief.target_word_count,
+        )
+
+    def generate_draft_from_blueprint(
+        self,
+        prompt: str,
+        brief: ResearchBrief,
+        blueprint: WriterBlueprint,
+        research_packet: ResearchPacket,
+    ) -> str:
+        return _mock_article_content(brief)
+
     def generate_draft(self, prompt: str, brief: ResearchBrief) -> str:
         """Return a full mock article as markdown."""
         return _mock_article_content(brief)
 
     def optimize_draft(self, prompt: str, draft: str) -> str:
-        """Return the draft unchanged (mock optimizer is a no-op)."""
-        return draft
+        """Apply lightweight cleanup so the optimizer stage does real work."""
+        optimized = re.sub(r"\n{3,}", "\n\n", draft).strip()
+        optimized = optimized.replace("## FAQ", "## Frequently Asked Questions")
+        if "## Frequently Asked Questions" not in optimized and "### " in optimized:
+            optimized += "\n\n## Frequently Asked Questions\n"
+        return optimized + "\n"
+
+    def optimize_sections(
+        self,
+        prompt: str,
+        content: str,
+        manifest: ArticleManifest,
+    ) -> OptimizationPatch:
+        return OptimizationPatch(
+            opening_direct_answer=manifest.opening_direct_answer or None,
+            internal_link_suggestions=[],
+            section_rewrites=[],
+            faq_questions_to_strengthen=manifest.faq_questions[:2],
+            notes=["Mock coordinator produced no-op patch."],
+        )
+
+    def judge_topic(self, prompt: str, topic: ScoredTopic, judge_name: str) -> JudgeScore:
+        score_map = {
+            "seo_opportunity_judge": 8.4,
+            "technical_authority_judge": 8.9,
+            "freshness_relevance_judge": 8.2 if topic.candidate.freshness_signal else 7.3,
+            "commercial_value_judge": 8.0 if topic.candidate.search_intent.value in {"commercial", "transactional"} else 7.1,
+            "originality_judge": 8.5 if not topic.rejection_reasons else 6.6,
+        }
+        return JudgeScore(
+            judge=judge_name,
+            score=score_map.get(judge_name, 7.5),
+            rationale=f"Mock {judge_name} assessment for {topic.candidate.title}.",
+            notes=[],
+        )
+
+    def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
+        technical_markers = sum(
+            1 for marker in ("pull request", "benchmark", "sast", "dast", "lint", "test")
+            if marker in content.lower()
+        )
+        base = {
+            "search_readiness_judge": 9.0,
+            "structure_clarity_judge": 9.1,
+            "technical_rigor_judge": 8.7 + min(1.0, technical_markers * 0.08),
+            "full_text_arbiter": 8.9,
+            "technical_accuracy_judge": 8.4 + min(0.7, technical_markers * 0.07),
+        }.get(judge_name, 8.2)
+        return JudgeScore(
+            judge=judge_name,
+            score=round(min(base, 10.0), 2),
+            rationale=f"Mock {judge_name} review of article quality.",
+            notes=[],
+        )
+
+    def fact_check_claims(
+        self,
+        prompt: str,
+        manifest: ArticleManifest,
+    ) -> FactCheckReport:
+        return FactCheckReport(
+            checked_claims=manifest.claim_candidates[:5],
+            verified_claims=manifest.claim_candidates[:5],
+            flagged_claims=[],
+            required_revisions=[],
+            notes=["Mock fact check passed."],
+            passed=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +617,43 @@ class ProviderRegistry:
         self.keyword_data = keyword_data or MockKeywordDataProvider()
         self.document_export = document_export or MockGoogleDocsProvider()
         self.content_generation = content_generation or MockContentGenerationProvider()
+
+    def drain_usage_records(self) -> list[Any]:
+        """Drain token-usage records from providers that support it."""
+        records: list[Any] = []
+        for provider in (self.market_signals, self.keyword_data, self.content_generation):
+            drain = getattr(provider, "drain_usage_records", None)
+            if callable(drain):
+                records.extend(drain())
+        return records
+
+
+def build_provider_registry(config: EngineConfig) -> ProviderRegistry:
+    """Build the provider registry from runtime configuration."""
+    if config.dry_run or config.provider_mode == "mock":
+        return ProviderRegistry()
+
+    if config.provider_mode != "openai":
+        raise ValueError(
+            f"Unsupported provider mode '{config.provider_mode}'. Expected 'mock' or 'openai'."
+        )
+
+    if not config.openai_api_key:
+        raise ValueError(
+            "OPENAI_API_KEY is required when SEO_ENGINE_PROVIDER=openai."
+        )
+
+    from .openai_providers import (
+        OpenAIContentGenerationProvider,
+        OpenAIKeywordDataProvider,
+        OpenAIMarketSignalProvider,
+    )
+
+    return ProviderRegistry(
+        market_signals=OpenAIMarketSignalProvider(config),
+        keyword_data=OpenAIKeywordDataProvider(config),
+        content_generation=OpenAIContentGenerationProvider(config),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -553,329 +852,520 @@ def _mock_topic_candidates() -> list[TopicCandidate]:
     ]
 
 
-def _mock_research_brief(topic: TopicCandidate) -> ResearchBrief:
-    """Build a complete research brief for the given topic."""
-    from .schemas import FAQ, InternalLink, OutlineSection
+COMMON_DO_NOT_SAY = [
+    "revolutionary",
+    "game-changing",
+    "industry-leading",
+    "best in class",
+    "replaces human code reviewers",
+    "eliminates all security vulnerabilities",
+    "guaranteed to reduce bugs",
+    "10x developer productivity",
+    "cutting-edge",
+    "state-of-the-art",
+]
 
+
+def _mock_research_brief(topic: TopicCandidate) -> ResearchBrief:
+    """Build a topic-aware research brief for the given topic."""
+    primary_keyword = _pick_primary_keyword(topic)
+    secondary_keywords = _secondary_keywords(topic)
     return ResearchBrief(
         topic=topic,
-        outline=[
-            OutlineSection(
-                heading="Introduction: The Linter Ceiling",
-                description="Set up the problem — linters are valuable but have a fundamental ceiling. They check syntax and patterns, not intent. AI review breaks through this ceiling.",
-                target_word_count=250,
-                key_points=[
-                    "Linters catch ~15-20% of defects (formatting, simple anti-patterns)",
-                    "Logic bugs, race conditions, and incomplete error handling slip through",
-                    "AI review understands what code is supposed to do, not just how it's written",
-                ],
-            ),
-            OutlineSection(
-                heading="What Linters Actually Catch (and What They Don't)",
-                description="Concrete breakdown of linter capabilities and limitations with examples.",
-                target_word_count=300,
-                key_points=[
-                    "Syntax errors, formatting, unused imports, simple complexity metrics",
-                    "Cannot: cross-function logic, business rule violations, race conditions",
-                    "Example: linter sees valid Python, misses missing return branch",
-                ],
-            ),
-            OutlineSection(
-                heading="How AI Code Review Detects Logic Bugs",
-                description="Technical explanation of how AI models trace execution paths and detect logical inconsistencies that pattern-matching tools cannot.",
-                target_word_count=350,
-                key_points=[
-                    "Semantic understanding of code intent",
-                    "Cross-function and cross-file analysis",
-                    "Context-aware: understands what the PR is trying to accomplish",
-                    "Code example: missing return, off-by-one, unchecked error",
-                ],
-            ),
-            OutlineSection(
-                heading="Real Bug Categories AI Catches That Linters Miss",
-                description="Categorized examples with code snippets for each bug type.",
-                target_word_count=400,
-                key_points=[
-                    "Incomplete error handling",
-                    "Race conditions and concurrency bugs",
-                    "Business logic violations",
-                    "Security vulnerabilities beyond pattern matching",
-                    "Type confusion in dynamic languages",
-                ],
-            ),
-            OutlineSection(
-                heading="Integrating AI Review Into Your Existing Workflow",
-                description="Practical guidance on adding AI review alongside linters, not replacing them.",
-                target_word_count=250,
-                key_points=[
-                    "AI review as a complement, not replacement",
-                    "Where in the CI pipeline to run each tool",
-                    "Handling overlapping findings",
-                    "Tuning sensitivity to reduce noise",
-                ],
-            ),
-            OutlineSection(
-                heading="Measuring the Impact",
-                description="How to measure whether AI review is actually catching more bugs.",
-                target_word_count=200,
-                key_points=[
-                    "Track bugs caught per review tool",
-                    "Measure production defect rates before/after",
-                    "PR cycle time as a proxy metric",
-                    "Developer satisfaction surveys",
-                ],
-            ),
-            OutlineSection(
-                heading="Frequently Asked Questions",
-                description="FAQ section for AEO optimization.",
-                target_word_count=300,
-                key_points=["5 FAQs with concise, direct answers"],
-            ),
-            OutlineSection(
-                heading="Conclusion",
-                description="Summarize and CTA.",
-                target_word_count=150,
-                key_points=["Linters necessary but not sufficient", "AI review fills the gap", "CTA"],
-            ),
-        ],
-        target_word_count=2200,
-        primary_keyword="ai code review",
-        secondary_keywords=[
-            "linters vs ai",
-            "logic bugs detection",
-            "automated code review",
-            "code review automation",
-            "ai pull request review",
-            "code quality tools",
-        ],
-        entities=[
-            "Macroscope",
-            "GitHub Copilot",
-            "ESLint",
-            "Pylint",
-            "SonarQube",
-            "OWASP",
-            "DORA metrics",
-        ],
-        faqs=[
-            FAQ(
-                question="What types of bugs does AI code review catch that linters miss?",
-                suggested_answer="AI code review catches logic errors, race conditions, incomplete error handling, business logic violations, and security vulnerabilities that require understanding code intent — not just syntax patterns.",
-            ),
-            FAQ(
-                question="Does AI code review replace linters?",
-                suggested_answer="No. AI code review complements linters. Linters handle formatting, syntax, and simple anti-patterns efficiently. AI review adds semantic analysis that catches logic bugs and architectural issues linters cannot detect.",
-            ),
-            FAQ(
-                question="How accurate is AI code review compared to human reviewers?",
-                suggested_answer="AI code review catches certain bug categories — like missing error handling and type confusion — more consistently than human reviewers. Humans remain better at architectural judgment and business context evaluation.",
-            ),
-            FAQ(
-                question="How does AI code review fit into a CI/CD pipeline?",
-                suggested_answer="AI code review runs as a PR check alongside linters and tests. It triggers on PR creation or update, analyzes the diff, and posts review comments. Most teams run it non-blocking initially, then promote to blocking.",
-            ),
-            FAQ(
-                question="What is the ROI of adding AI code review?",
-                suggested_answer="Teams typically see 25-40% reduction in PR cycle time and measurable drops in production defect rates within 3-6 months. ROI depends on team size, defect cost, and current review process maturity.",
-            ),
-        ],
-        claims_needing_evidence=[
-            "Linters catch 15-20% of defects",
-            "25-40% reduction in PR cycle time",
-            "Production defect rate improvements within 3-6 months",
-            "Gartner prediction on AI code review adoption",
-        ],
-        internal_link_suggestions=[
-            InternalLink(
-                anchor_text="AI code review best practices",
-                target_path="/blog/ai-code-review-best-practices",
-                context="Link when discussing how to configure AI review effectively",
-            ),
-            InternalLink(
-                anchor_text="reduce PR cycle time",
-                target_path="/blog/reducing-pr-cycle-time",
-                context="Link when discussing speed improvements from AI review",
-            ),
-            InternalLink(
-                anchor_text="static analysis vs AI review",
-                target_path="/blog/static-analysis-vs-ai-review",
-                context="Link in the linter comparison section for deeper analysis",
-            ),
-            InternalLink(
-                anchor_text="engineering productivity metrics",
-                target_path="/blog/engineering-productivity-metrics",
-                context="Link when discussing how to measure AI review impact",
-            ),
-        ],
-        cta="See how Macroscope catches the bugs your linters miss — try AI code review on your next PR.",
-        do_not_say=[
-            "revolutionary",
-            "game-changing",
-            "industry-leading",
-            "best in class",
-            "replaces human code reviewers",
-            "eliminates all security vulnerabilities",
-            "guaranteed to reduce bugs",
-            "10x developer productivity",
-            "cutting-edge",
-            "state-of-the-art",
-        ],
-        meta_description="Learn how AI code review catches logic bugs, race conditions, and security issues that traditional linters miss. Practical examples and integration guide.",
-        title_options=[
-            "How AI Code Review Catches Bugs That Linters Miss",
-            "AI vs. Linters: What Your Code Review Stack Is Missing",
-            "Beyond Linting: AI Code Review for Logic Bug Detection",
-        ],
+        outline=_build_outline(topic, primary_keyword),
+        target_word_count=1900,
+        primary_keyword=primary_keyword,
+        secondary_keywords=secondary_keywords,
+        entities=_cluster_entities(topic.cluster),
+        faqs=_build_faqs(topic, primary_keyword),
+        claims_needing_evidence=_claims_needing_evidence(topic),
+        internal_link_suggestions=_internal_links_for_cluster(topic.cluster),
+        cta=_cta_for_topic(topic),
+        do_not_say=[*COMMON_DO_NOT_SAY, "only tool worth evaluating"],
+        meta_description=_meta_description(topic, primary_keyword),
+        title_options=_title_options(topic, primary_keyword),
     )
 
 
 def _mock_article_content(brief: ResearchBrief) -> str:
-    """Return a full mock article (~1800 words) as markdown."""
-    return """# How AI Code Review Catches Bugs That Linters Miss
+    """Return a topic-aware mock article that passes the SEO/AEO checks."""
+    topic = brief.topic
+    primary_keyword = brief.primary_keyword
+    display_keyword = _display_keyword(primary_keyword)
+    title = brief.title_options[0]
+    freshness_sentence = (
+        f" In 2026, teams are revisiting this topic because {topic.freshness_signal.lower()}."
+        if topic.freshness_signal
+        else ""
+    )
 
-AI-powered code review catches logic errors, race conditions, and security vulnerabilities that traditional linters fundamentally cannot detect. While linters verify syntax and enforce formatting rules, AI review understands what your code is *supposed to do* — and flags when it doesn't.
+    intro = [
+        f"# {title}",
+        "",
+        (
+            f"{display_keyword} helps engineering teams catch the issues that slow reviews, create rework, "
+            f"and escape into production.{freshness_sentence} This matters for {topic.cluster.replace('-', ' ')} "
+            "because you need faster feedback without lowering code quality."
+        ),
+        "",
+        (
+            f"If you are evaluating {topic.title.lower()}, the key decision is not whether to automate more. "
+            f"It is how to add signal without adding noise. {brief.topic.description}"
+        ),
+        "",
+    ]
 
-Every engineering team runs linters. They catch real issues and enforce consistency. But if your quality strategy stops at linting, you're missing the bugs that actually cause production incidents. Here's how AI code review fills that gap, with concrete examples.
+    sections: list[str] = ["\n".join(intro).strip()]
+    internal_links = brief.internal_link_suggestions
+    link_index = 0
 
-## What Linters Actually Catch (and What They Don't)
+    for outline in brief.outline:
+        if outline.heading == "Frequently Asked Questions":
+            sections.append(_faq_section(brief))
+            continue
+        if outline.heading == "Conclusion":
+            sections.append(_conclusion_section(brief))
+            continue
+        section = _render_outline_section(
+            outline=outline,
+            brief=brief,
+            link=internal_links[link_index] if link_index < len(internal_links) else None,
+        )
+        if link_index < len(internal_links):
+            link_index += 1
+        sections.append(section)
 
-Linters are pattern-matching tools. They excel at:
+    article = "\n\n".join(sections).strip() + "\n"
+    return article
 
-- **Syntax errors** — missing brackets, invalid tokens, malformed expressions
-- **Style enforcement** — indentation, naming conventions, line length
-- **Simple anti-patterns** — unused variables, unreachable code, redundant comparisons
-- **Import hygiene** — unused imports, circular dependency warnings
 
-Tools like [ESLint](https://eslint.org), Pylint, and RuboCop handle these reliably and fast. They're essential infrastructure.
-
-But linters operate on *structure*, not *meaning*. They cannot answer:
-
-- Does this function return the correct value for all input combinations?
-- Is this error handling complete, or does it silently swallow failures?
-- Does this concurrent code have a race condition?
-- Does this authorization check actually protect the endpoint it's guarding?
-
-These questions require understanding intent — which is exactly what AI code review provides.
-
-## How AI Code Review Detects Logic Bugs
-
-AI code review models analyze code semantically. Instead of matching patterns, they build an understanding of:
-
-1. **What the PR is changing** — the diff in context of the full file
-2. **What the code should do** — inferred from function names, comments, types, and surrounding logic
-3. **Where the code falls short** — gaps between intent and implementation
-
-This allows AI reviewers to catch bugs that are invisible to pattern-matching tools.
-
-Consider this Python function:
-
-```python
-def calculate_discount(price: float, user: User) -> float:
-    if user.is_premium:
-        return price * 0.8
-    if user.has_coupon:
-        return price * 0.9
-```
-
-A linter sees syntactically valid Python. No warnings. But AI review catches the missing return: regular users without a coupon get `None` instead of the full price. This is a logic bug that causes a `TypeError` downstream — and linters will never flag it.
-
-Another example — incomplete error handling in Go:
-
-```go
-func fetchUser(id string) (*User, error) {
-    resp, err := http.Get(apiURL + "/users/" + id)
-    if err != nil {
-        return nil, err
+def _secondary_keywords(topic: TopicCandidate) -> list[str]:
+    seen: set[str] = set()
+    keywords: list[str] = []
+    cluster_defaults = {
+        "ai-code-review": ["automated code review", "ai pull request review", "code review automation"],
+        "pr-workflows": ["pull request workflow", "pr cycle time", "faster pull requests"],
+        "engineering-productivity": ["engineering metrics", "developer productivity", "dora metrics"],
+        "security-in-review": ["secure code review", "code security automation", "owasp code review"],
+        "devops-ci-cd": ["ci cd pipeline", "github actions code review", "automated review pipeline"],
+        "code-quality": ["code quality tools", "technical debt", "code maintainability"],
     }
-    // Missing: resp.Body.Close() and status code check
-    var user User
-    json.NewDecoder(resp.Body).Decode(&user)
-    return &user, nil
-}
-```
+    for keyword in [*topic.target_keywords, *cluster_defaults.get(topic.cluster, [])]:
+        normalized = keyword.lower().strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            keywords.append(normalized)
+    return keywords[:6]
 
-A linter might flag the unused `err` from `Decode`, but it won't catch the missing `resp.Body.Close()`, the unchecked HTTP status code, or the ignored decode error. AI review understands the HTTP client contract and flags all three.
 
-## Real Bug Categories AI Catches
+def _pick_primary_keyword(topic: TopicCandidate) -> str:
+    def score(keyword: str) -> float:
+        lowered = keyword.lower().strip()
+        word_count = len(lowered.split())
+        value = 0.0
+        if "ai code review" in lowered:
+            value += 4.0
+        elif "code review" in lowered:
+            value += 2.5
+        if 2 <= word_count <= 4:
+            value += 2.0
+        elif word_count == 1:
+            value += 0.5
+        else:
+            value += 1.0
+        if any(token in lowered for token in ("comparison", "evaluate", "framework", "expectations")):
+            value += 1.5
+        if any(token in lowered for token in ("best ", "speed")):
+            value -= 1.5
+        return value
 
-Based on analysis of review findings across production codebases, AI code review consistently catches these categories that linters miss:
+    best = max(topic.target_keywords, key=score)
+    return best.lower().strip()
 
-### Incomplete Error Handling
 
-The most common category. Functions that handle some error cases but not all, `try/catch` blocks that swallow exceptions silently, and API calls with unchecked response codes.
+def _cluster_entities(cluster: str) -> list[str]:
+    entities = {
+        "ai-code-review": ["Macroscope", "GitHub", "GitLab", "GitHub Copilot", "ESLint", "SonarQube"],
+        "pr-workflows": ["Macroscope", "GitHub", "GitLab", "Pull Requests", "DORA metrics", "Slack"],
+        "engineering-productivity": ["Macroscope", "DORA metrics", "GitHub", "GitLab", "Engineering managers"],
+        "security-in-review": ["Macroscope", "OWASP", "SAST", "DAST", "GitHub", "GitLab"],
+        "devops-ci-cd": ["Macroscope", "GitHub Actions", "GitLab CI", "Jenkins", "Buildkite", "Pull Requests"],
+        "code-quality": ["Macroscope", "Linters", "Static analysis", "Code review", "Technical debt"],
+    }
+    return entities.get(cluster, ["Macroscope", "GitHub", "GitLab", "Code review", "Engineering teams"])
 
-### Race Conditions
 
-Concurrent access to shared state without proper synchronization. AI review traces data flow across goroutines, threads, or async handlers to identify unprotected mutations.
+def _build_outline(topic: TopicCandidate, primary_keyword: str) -> list[OutlineSection]:
+    display_keyword = _display_keyword(primary_keyword)
+    solution_heading = {
+        "ai-code-review": f"How {display_keyword} improves review quality",
+        "pr-workflows": f"How {display_keyword} improves pull request flow",
+        "engineering-productivity": f"How {display_keyword} improves engineering productivity",
+        "security-in-review": f"How {display_keyword} improves secure code review",
+        "devops-ci-cd": f"How {display_keyword} fits into CI/CD",
+        "code-quality": f"How {display_keyword} improves code quality",
+    }.get(topic.cluster, f"How {display_keyword} helps engineering teams")
 
-### Business Logic Violations
+    return [
+        OutlineSection(
+            heading=f"Why {display_keyword} matters now",
+            description=f"Explain the problem behind {topic.title.lower()} and why teams are prioritizing it right now.",
+            target_word_count=260,
+            key_points=[
+                topic.description,
+                f"Why this matters to teams focused on {topic.cluster.replace('-', ' ')}",
+                "The operational cost of waiting too long to fix the issue",
+            ],
+        ),
+        OutlineSection(
+            heading=solution_heading,
+            description="Describe the mechanism, workflow, and practical leverage points.",
+            target_word_count=320,
+            key_points=[
+                f"Where {primary_keyword} adds signal in the workflow",
+                "What changes for reviewers, authors, and engineering leaders",
+                "How to keep findings actionable instead of noisy",
+            ],
+        ),
+        OutlineSection(
+            heading="What strong teams do differently",
+            description="Translate the angle into practical operating habits and implementation patterns.",
+            target_word_count=280,
+            key_points=[
+                "How mature teams scope rollout and define guardrails",
+                "How they write review guidelines and measure drift",
+                "How they decide what stays blocking vs advisory",
+            ],
+        ),
+        OutlineSection(
+            heading="Implementation example",
+            description="Use a concrete example to show how the process works in practice.",
+            target_word_count=260,
+            key_points=[
+                "One realistic code or workflow example",
+                "The bug, risk, or bottleneck that gets caught earlier",
+                "What the team changes after seeing the result",
+            ],
+        ),
+        OutlineSection(
+            heading="How to measure whether it is working",
+            description="Cover the metrics and feedback loops teams should use.",
+            target_word_count=220,
+            key_points=[
+                "Leading indicators before rollout",
+                "Quality and cycle-time metrics after rollout",
+                "How to avoid vanity metrics",
+            ],
+        ),
+        OutlineSection(
+            heading="Frequently Asked Questions",
+            description="AEO-oriented FAQs with concise answers.",
+            target_word_count=280,
+            key_points=["5 concise answers"],
+        ),
+        OutlineSection(
+            heading="Conclusion",
+            description="Tight summary and CTA.",
+            target_word_count=150,
+            key_points=["Summary", "Recommended next step", "CTA"],
+        ),
+    ]
 
-Code that runs without errors but produces wrong results. Off-by-one errors in pagination, incorrect boundary conditions in pricing logic, and authorization checks that don't cover all code paths.
 
-### Security Vulnerabilities Beyond SAST
+def _build_faqs(topic: TopicCandidate, primary_keyword: str) -> list[FAQ]:
+    display_keyword = _display_keyword(primary_keyword)
+    specific_question = {
+        "ai-code-review": f"What does {display_keyword} catch that linters miss?",
+        "pr-workflows": f"How does {display_keyword} affect pull request cycle time?",
+        "engineering-productivity": f"How should teams measure the impact of {display_keyword}?",
+        "security-in-review": f"How does {display_keyword} complement SAST and DAST?",
+        "devops-ci-cd": f"Where should {display_keyword} run in a CI/CD pipeline?",
+        "code-quality": f"How does {display_keyword} improve code quality without adding churn?",
+    }.get(topic.cluster, f"When should a team adopt {display_keyword}?")
 
-While SAST tools catch known vulnerability patterns (SQL injection templates, XSS sinks), AI review catches context-dependent security issues: insecure deserialization with user-controlled types, SSRF through indirect URL construction, and broken access control in complex authorization flows.
+    return [
+        FAQ(
+            question=f"What is {display_keyword}?",
+            suggested_answer=(
+                f"{display_keyword} is the practice of using context-aware automation to improve review quality, "
+                "speed up feedback, and surface issues before they reach production. The value comes from better decision support, "
+                "not from replacing human judgment."
+            ),
+        ),
+        FAQ(
+            question=specific_question,
+            suggested_answer=(
+                f"{display_keyword} works best when it handles the repetitive analysis humans skip under time pressure, "
+                "then escalates the findings that need architectural or business judgment. That gives teams faster reviews without "
+                "turning every pull request into a wall of low-signal comments."
+            ),
+        ),
+        FAQ(
+            question=f"Does {display_keyword} replace human reviewers?",
+            suggested_answer=(
+                "No. Human reviewers still own architecture, trade-offs, and product context. Good automation removes routine review work, "
+                "catches issues earlier, and gives senior engineers more time to focus on the changes that actually need deep judgment."
+            ),
+        ),
+        FAQ(
+            question=f"How should teams roll out {display_keyword}?",
+            suggested_answer=(
+                "Start with a narrow rollout, define what should be advisory versus blocking, and review findings weekly. Teams get better results "
+                "when they tune prompts, severity thresholds, and review guidelines before scaling usage across every repository."
+            ),
+        ),
+        FAQ(
+            question=f"How do you measure whether {display_keyword} is working?",
+            suggested_answer=(
+                "Track review turnaround time, production defects, rework after merge, and whether reviewers spend less time on mechanical checks. "
+                "The best signal is a combination of faster cycle time and better issue discovery, not one metric in isolation."
+            ),
+        ),
+    ]
 
-For a deeper comparison, see our analysis of [static analysis vs AI review](/blog/static-analysis-vs-ai-review).
 
-### Type Confusion in Dynamic Languages
+def _claims_needing_evidence(topic: TopicCandidate) -> list[str]:
+    return [
+        f"Performance gains claimed for {topic.title.lower()}",
+        "Changes to production defect rates after rollout",
+        "Any percentage improvement in review time or throughput",
+    ]
 
-Python, JavaScript, and Ruby code where a variable can hold different types depending on the code path. AI review traces type flow and catches cases where a string is treated as a number, or where `None`/`null`/`undefined` reaches code that doesn't handle it.
 
-## Integrating AI Review Into Your Existing Workflow
+def _internal_links_for_cluster(cluster: str) -> list[InternalLink]:
+    links = {
+        "ai-code-review": [
+            ("AI code review best practices", "/blog/ai-code-review-best-practices"),
+            ("static analysis vs AI review", "/blog/static-analysis-vs-ai-review"),
+            ("reduce PR cycle time", "/blog/reducing-pr-cycle-time"),
+            ("engineering productivity metrics", "/blog/engineering-productivity-metrics"),
+        ],
+        "pr-workflows": [
+            ("reduce PR cycle time", "/blog/reducing-pr-cycle-time"),
+            ("AI code review best practices", "/blog/ai-code-review-best-practices"),
+            ("engineering productivity metrics", "/blog/engineering-productivity-metrics"),
+            ("static analysis vs AI review", "/blog/static-analysis-vs-ai-review"),
+        ],
+        "engineering-productivity": [
+            ("engineering productivity metrics", "/blog/engineering-productivity-metrics"),
+            ("reduce PR cycle time", "/blog/reducing-pr-cycle-time"),
+            ("AI code review best practices", "/blog/ai-code-review-best-practices"),
+            ("static analysis vs AI review", "/blog/static-analysis-vs-ai-review"),
+        ],
+        "security-in-review": [
+            ("static analysis vs AI review", "/blog/static-analysis-vs-ai-review"),
+            ("AI code review best practices", "/blog/ai-code-review-best-practices"),
+            ("reduce PR cycle time", "/blog/reducing-pr-cycle-time"),
+            ("engineering productivity metrics", "/blog/engineering-productivity-metrics"),
+        ],
+    }
+    selected = links.get(cluster, links["ai-code-review"])
+    return [
+        InternalLink(anchor_text=anchor, target_path=path, context=f"Use when discussing {anchor}")
+        for anchor, path in selected
+    ]
 
-AI code review is not a replacement for linters — it's an additional layer. The most effective setup runs both:
 
-1. **Linters first** — fast, deterministic, catches the easy stuff
-2. **Tests** — verify behavior against known cases
-3. **AI review** — catches the logic bugs that survived steps 1 and 2
+def _meta_description(topic: TopicCandidate, primary_keyword: str) -> str:
+    summary = (
+        f"Learn how {_display_keyword(primary_keyword)} helps teams with {topic.title.lower()}. "
+        "Get practical guidance, implementation patterns, and metrics that matter."
+    )
+    return _fit_length(summary, 155)
 
-Most teams integrate AI review as a PR check in their CI pipeline. Tools like [Macroscope](https://macroscope.com) integrate with GitHub and GitLab, running automatically when a PR is opened or updated.
 
-Start with AI review in **non-blocking mode** — it posts comments but doesn't prevent merging. Once your team trusts the signal quality and has tuned sensitivity, promote it to a blocking check.
+def _title_options(topic: TopicCandidate, primary_keyword: str) -> list[str]:
+    display_keyword = _display_keyword(primary_keyword)
+    options = [
+        topic.title,
+        _fit_length(f"{display_keyword}: {topic.title}", 58),
+        _fit_length(f"{display_keyword} for {topic.cluster.replace('-', ' ').title()}", 56),
+    ]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for option in options:
+        normalized = option.strip()
+        if normalized and normalized.lower() not in seen:
+            seen.add(normalized.lower())
+            deduped.append(normalized)
+    return deduped[:3]
 
-For setup patterns across different CI systems, see our guide on [AI code review best practices](/blog/ai-code-review-best-practices).
 
-To reduce noise during onboarding, configure severity thresholds so only high-confidence findings appear initially. Expand coverage as the model learns your codebase patterns.
+def _cta_for_topic(topic: TopicCandidate) -> str:
+    if topic.cluster == "security-in-review":
+        return "See how Macroscope helps your team catch risky changes before they reach production."
+    if topic.cluster == "pr-workflows":
+        return "See how Macroscope helps your team shorten PR cycles without lowering review quality."
+    return "See how Macroscope helps your team catch issues earlier and keep pull requests moving."
 
-## Measuring the Impact
 
-Adding AI review is an investment. Measure its return:
+def _render_outline_section(
+    outline: OutlineSection,
+    brief: ResearchBrief,
+    link: InternalLink | None,
+) -> str:
+    primary_keyword = brief.primary_keyword
+    display_keyword = _display_keyword(primary_keyword)
+    lead, support = _section_paragraphs(outline.heading, brief)
+    body = [
+        f"## {outline.heading}",
+        "",
+        lead,
+        "",
+        support,
+        "",
+        (
+            f"That matters because {display_keyword} should change behavior in the review loop, not just create more commentary. "
+            "The strongest implementations make expectations explicit, connect findings to ownership, and leave a clear paper trail "
+            "for what the team will tune next."
+        ),
+        "",
+    ]
 
-- **Bugs caught per tool** — track which tool (linter, tests, AI review, human reviewer) catches which bugs. This shows where AI review adds unique value.
-- **Production defect rate** — measure defects reaching production before and after AI review adoption. Teams report measurable drops within 3-6 months.
-- **PR cycle time** — counterintuitively, adding AI review often [reduces PR cycle time](/blog/reducing-pr-cycle-time) because human reviewers spend less time on mechanical checks.
-- **Developer satisfaction** — survey your team. Good AI review should feel like a helpful colleague, not a noisy alarm.
+    if any("example" in point.lower() for point in outline.key_points):
+        body.extend(
+            [
+                "```python",
+                "def merge_ready(pr):",
+                "    if pr.tests_failed:",
+                "        return False",
+                "    if pr.approvals >= 2 and not pr.has_blocking_findings:",
+                "        return True",
+                "```",
+                "",
+                (
+                    "In a real workflow, the issue is rarely syntax. It is whether the rules capture the cases your team "
+                    "actually cares about. That is where context-aware review earns its place."
+                ),
+                "",
+            ]
+        )
 
-Track these as part of your broader [engineering productivity metrics](/blog/engineering-productivity-metrics) framework.
+    bullets = "\n".join(f"- {point}" for point in outline.key_points)
+    body.extend([bullets, ""])
 
-## Frequently Asked Questions
+    if link is not None:
+        body.extend(
+            [
+                (
+                    f"For a related example, see [{link.anchor_text}]({link.target_path}). It is a useful companion when "
+                    f"you are building a rollout plan around {display_keyword}."
+                ),
+                "",
+            ]
+        )
 
-### What types of bugs does AI code review catch that linters miss?
+    body.append(
+        f"The teams that get the best results from {display_keyword} review findings weekly, "
+        "remove recurring noise, and treat the output as part of the pull request system instead "
+        "of a separate reporting stream."
+    )
+    return "\n".join(body).strip()
 
-AI code review catches logic errors, race conditions, incomplete error handling, business logic violations, and security vulnerabilities that require understanding code intent — not just syntax patterns. These are the bugs that cause production incidents.
 
-### Does AI code review replace linters?
+def _faq_section(brief: ResearchBrief) -> str:
+    lines = ["## Frequently Asked Questions", ""]
+    for faq in brief.faqs:
+        lines.extend([f"### {faq.question}", "", faq.suggested_answer, ""])
+    return "\n".join(lines).strip()
 
-No. AI code review complements linters. Linters handle formatting, syntax, and simple anti-patterns efficiently and deterministically. AI review adds semantic analysis that catches logic bugs and architectural issues linters cannot detect. Run both.
 
-### How accurate is AI code review compared to human reviewers?
+def _conclusion_section(brief: ResearchBrief) -> str:
+    display_keyword = _display_keyword(brief.primary_keyword)
+    return "\n".join(
+        [
+            "## Conclusion",
+            "",
+            (
+                f"{display_keyword} works when it improves the decisions your team already makes during review. "
+                "The goal is not to automate everything. The goal is to surface high-signal issues earlier, keep reviewers focused, "
+                "and give engineering leaders a cleaner feedback loop."
+            ),
+            "",
+            brief.cta,
+        ]
+    ).strip()
 
-AI code review catches certain bug categories — like missing error handling and type confusion — more consistently than human reviewers, who may overlook them under time pressure. Humans remain better at architectural judgment, design review, and business context evaluation.
 
-### How does AI code review fit into a CI/CD pipeline?
+def _fit_length(text: str, max_len: int) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    shortened = cleaned[: max_len - 3].rsplit(" ", 1)[0].rstrip(" ,:;.-")
+    return f"{shortened}..."
 
-AI code review runs as a PR check alongside linters and tests. It triggers on PR creation or update, analyzes the diff in context, and posts review comments directly on the PR. Most teams start non-blocking and promote to blocking after tuning.
 
-### What is the ROI of adding AI code review?
+def _section_paragraphs(heading: str, brief: ResearchBrief) -> tuple[str, str]:
+    topic = brief.topic
+    primary_keyword = brief.primary_keyword
+    display_keyword = _display_keyword(primary_keyword)
+    secondary_keyword = (
+        brief.secondary_keywords[1]
+        if len(brief.secondary_keywords) > 1
+        else brief.secondary_keywords[0]
+    )
 
-Teams typically see 25-40% reduction in PR cycle time and measurable drops in production defect rates within 3-6 months. The return depends on team size, cost per production defect, and current review process maturity.
+    if heading.startswith("Why "):
+        return (
+            f"{topic.title} matters now because senior reviewers want AI help on the issues that actually burn time: "
+            f"architecture drift, unclear ownership, and defects that survive a quick skim. {display_keyword} becomes "
+            "valuable when it narrows attention to those decisions instead of repeating what lint and tests already say.",
+            f"{topic.rationale} That is why strong teams tie rollout to a clear operating problem, such as slower pull requests, "
+            f"noisy review queues, or weak signal around {secondary_keyword}, instead of adopting it as a generic automation layer.",
+        )
 
-## Conclusion
+    if "improves" in heading:
+        return (
+            f"{display_keyword} improves review quality when it understands the change in context and explains why a finding matters. "
+            "Senior engineers do not want more comments. They want fewer, sharper comments that point to design risk, missing edge cases, and workflow bottlenecks.",
+            f"The best implementations route low-value style feedback back to deterministic tools and reserve AI review for reasoning-heavy checks. "
+            f"That keeps the review process useful for both authors and reviewers while making {secondary_keyword} easier to discuss with concrete evidence.",
+        )
 
-Linters are necessary but not sufficient. They catch syntax and style issues reliably — but the bugs that cause production incidents are logic errors, race conditions, and security vulnerabilities that require understanding what code *means*.
+    if heading == "What strong teams do differently":
+        return (
+            "Strong teams define review guidelines before they scale usage. They decide which findings should be blocking, which stay advisory, "
+            "and which patterns the system should ignore entirely because human reviewers have already decided they are low value.",
+            "They also review findings as a system, not one pull request at a time. That lets them tighten prompts, rewrite guidance, and remove repeating noise "
+            "before developers lose trust in the workflow.",
+        )
 
-AI code review fills this gap. It analyzes code semantically, catches bug categories that pattern-matching tools miss, and integrates into the workflows your team already uses.
+    if heading == "Implementation example":
+        return (
+            f"A practical rollout starts with one repository, one pull request flow, and one class of findings your team cares about. "
+            f"For this topic, that usually means starting with {display_keyword} on changes where missing context causes expensive review churn.",
+            f"Once the first rollout is stable, teams add adjacent checks around {secondary_keyword}, compare the output with human review comments, "
+            "and keep only the patterns that produce consistent action from reviewers.",
+        )
 
-See how Macroscope catches the bugs your linters miss — [try AI code review on your next PR](https://macroscope.com).
-"""
+    if heading == "How to measure whether it is working":
+        return (
+            f"Measure {display_keyword} the same way you would measure any workflow improvement: with leading indicators before rollout and outcome metrics after rollout. "
+            "Useful signals include review turnaround time, rework after review, escaped defects, and whether senior reviewers spend less time on mechanical comments.",
+            "The key is to compare quality and speed together. A faster review loop does not help if the team starts missing important issues, and more findings do not help "
+            "if nobody trusts or acts on them.",
+        )
+
+    return (
+        f"{topic.description} The point is to turn the topic into a repeatable operating habit, not a one-off experiment.",
+        f"{topic.rationale} Teams get better results when they connect the workflow to concrete engineering outcomes and tune it over time.",
+    )
+
+
+def _display_keyword(keyword: str) -> str:
+    display = keyword.title()
+    replacements = {
+        "Ai": "AI",
+        "Pr": "PR",
+        "Ci/Cd": "CI/CD",
+        "Cd": "CD",
+        "Dora": "DORA",
+        "Roi": "ROI",
+        "Sast": "SAST",
+        "Dast": "DAST",
+        "Mttr": "MTTR",
+        "Owasp": "OWASP",
+    }
+    for old, new in replacements.items():
+        display = display.replace(old, new)
+    return display

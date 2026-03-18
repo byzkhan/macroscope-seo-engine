@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,9 +20,9 @@ import click
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .config import load_config
+from .config import ensure_live_run_provider, load_config
 from .orchestrator import PipelineOrchestrator
-from .providers import ProviderRegistry
+from .providers import build_provider_registry
 from .storage import RunStore, get_latest_run, list_runs
 
 console = Console()
@@ -60,9 +61,10 @@ def cli(ctx: click.Context, verbose: bool, json_output: bool) -> None:
 
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Run pipeline without external calls")
+@click.option("--run-id", default=None, help="Use a pre-created run id (dashboard worker mode)")
 @click.option("--root", type=click.Path(exists=True, path_type=Path), default=None)
 @click.pass_context
-def run(ctx: click.Context, dry_run: bool, root: Path | None) -> None:
+def run(ctx: click.Context, dry_run: bool, run_id: str | None, root: Path | None) -> None:
     """Execute a full pipeline run."""
     json_output = ctx.obj.get("json_output", False)
 
@@ -75,15 +77,89 @@ def run(ctx: click.Context, dry_run: bool, root: Path | None) -> None:
             console.print(f"[red]Config error: {e}[/red]")
         sys.exit(EXIT_CONFIG_ERROR)
 
-    providers = ProviderRegistry()  # uses mocks by default
+    try:
+        ensure_live_run_provider(config, context="Pipeline run")
+    except ValueError as e:
+        if dry_run:
+            pass
+        elif json_output:
+            click.echo(json.dumps({"success": False, "error": str(e)}))
+            sys.exit(EXIT_CONFIG_ERROR)
+        else:
+            console.print(f"[red]Config error: {e}[/red]")
+            sys.exit(EXIT_CONFIG_ERROR)
+
+    try:
+        providers = build_provider_registry(config)
+    except ValueError as e:
+        if json_output:
+            click.echo(json.dumps({"success": False, "error": str(e)}))
+        else:
+            console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
     orchestrator = PipelineOrchestrator(config, providers)
-    summary = orchestrator.run()
+    summary = orchestrator.run(run_id=run_id)
 
     if json_output:
         click.echo(json.dumps(summary.to_concise_json(), indent=2))
 
     if not summary.success:
-        has_fatal = any(not s.success for s in summary.stages if s.stage in ("score_topics", "build_brief", "write_draft"))
+        has_fatal = any(
+            not s.success
+            for s in summary.stages
+            if s.stage in ("bootstrap_run", "score_topics", "build_brief", "write_draft")
+        )
+        sys.exit(EXIT_FATAL if has_fatal else EXIT_PIPELINE_ERROR)
+    sys.exit(EXIT_SUCCESS)
+
+
+@cli.command()
+@click.option("--run-id", required=True, help="Interrupted run id to resume")
+@click.option("--root", type=click.Path(exists=True, path_type=Path), default=None)
+@click.pass_context
+def resume(ctx: click.Context, run_id: str, root: Path | None) -> None:
+    """Resume an interrupted run from its last durable stage checkpoint."""
+    json_output = ctx.obj.get("json_output", False)
+
+    try:
+        config = load_config(root=root, json_output=json_output)
+    except FileNotFoundError as e:
+        if json_output:
+            click.echo(json.dumps({"success": False, "error": str(e)}))
+        else:
+            console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    try:
+        ensure_live_run_provider(config, context="Pipeline resume")
+    except ValueError as e:
+        if json_output:
+            click.echo(json.dumps({"success": False, "error": str(e)}))
+        else:
+            console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    try:
+        providers = build_provider_registry(config)
+    except ValueError as e:
+        if json_output:
+            click.echo(json.dumps({"success": False, "error": str(e)}))
+        else:
+            console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    orchestrator = PipelineOrchestrator(config, providers)
+    summary = orchestrator.run(run_id=run_id, resume=True)
+
+    if json_output:
+        click.echo(json.dumps(summary.to_concise_json(), indent=2))
+
+    if not summary.success:
+        has_fatal = any(
+            not s.success
+            for s in summary.stages
+            if s.stage in ("bootstrap_run", "score_topics", "build_brief", "write_draft")
+        )
         sys.exit(EXIT_FATAL if has_fatal else EXIT_PIPELINE_ERROR)
     sys.exit(EXIT_SUCCESS)
 
@@ -102,7 +178,11 @@ def score_topics(ctx: click.Context, cluster: str | None, root: Path | None) -> 
         console.print(f"[red]Config error: {e}[/red]")
         sys.exit(EXIT_CONFIG_ERROR)
 
-    providers = ProviderRegistry()
+    try:
+        providers = build_provider_registry(config)
+    except ValueError as e:
+        console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
     orchestrator = PipelineOrchestrator(config, providers)
 
     # Run first 3 stages manually
@@ -116,8 +196,10 @@ def score_topics(ctx: click.Context, cluster: str | None, root: Path | None) -> 
         started_at=datetime.now(timezone.utc),
     )
 
-    ctx_data: dict = {}
+    ctx_data: dict = {"cluster_filter": cluster} if cluster else {}
     try:
+        result = orchestrator._bootstrap_run(ctx_data)
+        ctx_data.update(result)
         result = orchestrator._collect_signals(ctx_data)
         ctx_data.update(result)
         result = orchestrator._generate_topics(ctx_data)
@@ -190,6 +272,30 @@ def list_runs_cmd(ctx: click.Context, root: Path | None) -> None:
     else:
         for r in runs:
             console.print(f"  {r}")
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Dashboard host")
+@click.option("--port", default=8051, type=int, show_default=True, help="Dashboard port")
+@click.option("--root", type=click.Path(exists=True, path_type=Path), default=None)
+def dashboard(host: str, port: int, root: Path | None) -> None:
+    """Launch the visual dashboard for runs, artifacts, and scheduling."""
+    try:
+        config = load_config(root=root)
+    except FileNotFoundError as e:
+        console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    os.environ["MACROSCOPE_UI_ROOT"] = str(config.project_root)
+
+    try:
+        import uvicorn
+    except ImportError as e:
+        console.print(f"[red]Dashboard dependency missing: {e}[/red]")
+        sys.exit(EXIT_CONFIG_ERROR)
+
+    console.print(f"[green]Launching dashboard at http://{host}:{port}[/green]")
+    uvicorn.run("app.dashboard:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

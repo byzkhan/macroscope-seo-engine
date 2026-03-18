@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
@@ -26,12 +26,14 @@ class SearchIntent(str, Enum):
 class PipelineStage(str, Enum):
     """Named pipeline stages for tracking and artifact mapping."""
 
+    BOOTSTRAP_RUN = "bootstrap_run"
     COLLECT_SIGNALS = "collect_signals"
     GENERATE_TOPICS = "generate_topics"
     SCORE_TOPICS = "score_topics"
     BUILD_BRIEF = "build_brief"
     WRITE_DRAFT = "write_draft"
     QA_OPTIMIZE = "qa_optimize"
+    FACT_CHECK = "fact_check"
     EXPORT = "export"
     PERSIST_HISTORY = "persist_history"
 
@@ -45,7 +47,55 @@ class FailureCategory(str, Enum):
     QA_FAILURE = "qa_failure"
     IO_ERROR = "io_error"
     TIMEOUT = "timeout"
+    CANCELED = "canceled"
     UNKNOWN = "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Run context and execution policies
+# ---------------------------------------------------------------------------
+
+
+class QualityPolicy(BaseModel):
+    """Quality and retry thresholds for a single run."""
+
+    min_topic_consensus_score: float = Field(default=7.2, ge=0.0, le=10.0)
+    min_topic_authority_score: float = Field(default=7.5, ge=0.0, le=10.0)
+    min_brief_quality_score: float = Field(default=8.0, ge=0.0, le=10.0)
+    min_draft_quality_score: float = Field(default=8.2, ge=0.0, le=10.0)
+    final_average_score: float = Field(default=9.0, ge=0.0, le=10.0)
+    final_min_judge_score: float = Field(default=8.0, ge=0.0, le=10.0)
+    final_technical_accuracy_score: float = Field(default=9.0, ge=0.0, le=10.0)
+    topic_judge_spread_threshold: float = Field(default=1.5, ge=0.0, le=10.0)
+    topic_judge_variance_threshold: float = Field(default=0.7, ge=0.0, le=10.0)
+    draft_judge_spread_threshold: float = Field(default=1.4, ge=0.0, le=10.0)
+    draft_judge_variance_threshold: float = Field(default=0.6, ge=0.0, le=10.0)
+    final_judge_spread_threshold: float = Field(default=1.2, ge=0.0, le=10.0)
+    final_judge_variance_threshold: float = Field(default=0.45, ge=0.0, le=10.0)
+    max_research_retries: int = Field(default=1, ge=0, le=5)
+    max_brief_retries: int = Field(default=1, ge=0, le=5)
+    max_optimization_rounds: int = Field(default=0, ge=0)
+
+
+class SourcePolicy(BaseModel):
+    """Required source coverage for technically credible research."""
+
+    required_source_classes: list[str] = Field(default_factory=list)
+    minimum_unique_classes: int = Field(default=3, ge=1, le=10)
+    require_primary_technical_source: bool = True
+    lookback_days: int = Field(default=14, ge=1, le=90)
+
+
+class RunContext(BaseModel):
+    """Immutable run-scoped execution context."""
+
+    run_id: str
+    run_started_at: datetime
+    provider_mode: str
+    config_snapshot: dict[str, Any] = Field(default_factory=dict)
+    quality_policy: QualityPolicy
+    source_policy: SourcePolicy
+    agent_manifest: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +165,36 @@ class MarketSignalReport(BaseModel):
         return result
 
 
+class CanonicalSource(BaseModel):
+    """Normalized source reference used in the research packet."""
+
+    source_class: str
+    title: str
+    url: Optional[str] = None
+    note: str = ""
+
+
+class ResearchFact(BaseModel):
+    """Compact normalized fact extracted from research."""
+
+    statement: str = Field(..., min_length=10)
+    source_class: str
+    evidence_titles: list[str] = Field(default_factory=list)
+    freshness_note: Optional[str] = None
+
+
+class ResearchPacket(BaseModel):
+    """Structured, reusable research artifact for downstream stages."""
+
+    themes: list[str] = Field(default_factory=list)
+    normalized_facts: list[ResearchFact] = Field(default_factory=list)
+    canonical_sources: list[CanonicalSource] = Field(default_factory=list)
+    fresh_market_notes: list[str] = Field(default_factory=list)
+    keyword_serp_notes: list[str] = Field(default_factory=list)
+    source_coverage: Optional["SourceCoverageReport"] = None
+    collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -159,6 +239,11 @@ class ScoredTopic(BaseModel):
     score: TopicScore
     rejection_reasons: list[str] = Field(default_factory=list)
     selected: bool = False
+    judge_scores: list["JudgeScore"] = Field(default_factory=list)
+    consensus_score: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    consensus_variance: Optional[float] = Field(default=None, ge=0.0)
+    selection_notes: list[str] = Field(default_factory=list)
+    reuse_penalty: float = Field(default=0.0, ge=0.0, le=10.0)
 
     @computed_field
     @property
@@ -227,6 +312,51 @@ class ResearchBrief(BaseModel):
         return hashlib.sha256(self.model_dump_json().encode()).hexdigest()[:12]
 
 
+class BriefQualityReport(BaseModel):
+    """Local evaluation of the generated research brief."""
+
+    score: float = Field(..., ge=0.0, le=10.0)
+    passed: bool
+    notes: list[str] = Field(default_factory=list)
+
+
+class BriefOutlinePlan(BaseModel):
+    """Specialist output for outline and title planning."""
+
+    outline: list[OutlineSection] = Field(..., min_length=3)
+    target_word_count: int = Field(default=2000, ge=800, le=5000)
+    title_options: list[str] = Field(..., min_length=2)
+
+
+class BriefEntityPlan(BaseModel):
+    """Specialist output for keyword and entity planning."""
+
+    primary_keyword: str
+    secondary_keywords: list[str] = Field(..., min_length=2)
+    entities: list[str] = Field(..., min_length=1)
+    meta_description: str = Field(..., min_length=50, max_length=160)
+
+
+class BriefFAQPlan(BaseModel):
+    """Specialist output for FAQ planning."""
+
+    faqs: list[FAQ] = Field(..., min_length=4)
+
+
+class BriefLinkPlan(BaseModel):
+    """Specialist output for internal links and CTA."""
+
+    internal_link_suggestions: list[InternalLink] = Field(..., min_length=2)
+    cta: str = Field(..., min_length=5)
+
+
+class BriefClaimsPlan(BaseModel):
+    """Specialist output for evidence and risk guidance."""
+
+    claims_needing_evidence: list[str] = Field(default_factory=list)
+    do_not_say: list[str] = Field(..., min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # Articles
 # ---------------------------------------------------------------------------
@@ -241,6 +371,142 @@ class DraftArticle(BaseModel):
     word_count: int = Field(..., ge=1)
     brief_hash: str = Field(..., description="SHA-256 prefix of the serialized brief")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BlueprintSection(BaseModel):
+    """A compact planned section for a writer blueprint."""
+
+    heading: str = Field(..., min_length=2)
+    bullets: list[str] = Field(default_factory=list)
+    claims_to_support: list[str] = Field(default_factory=list)
+
+
+class WriterBlueprint(BaseModel):
+    """Low-token draft plan used before generating a full article."""
+
+    writer_id: str
+    writer_label: str
+    focus_summary: str
+    title: str
+    opening_hook: str = Field(..., min_length=20)
+    direct_answer: str = Field(..., min_length=30)
+    sections: list[BlueprintSection] = Field(default_factory=list, min_length=3)
+    faq_plan: list[str] = Field(default_factory=list)
+    internal_link_targets: list[str] = Field(default_factory=list)
+    claims_plan: list[str] = Field(default_factory=list)
+    estimated_word_count: int = Field(default=1800, ge=600, le=5000)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BlueprintEvaluation(BaseModel):
+    """Local scoring for one writer blueprint."""
+
+    writer_id: str
+    score: float = Field(..., ge=0.0, le=10.0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class DraftVariant(BaseModel):
+    """One writer persona's candidate draft."""
+
+    writer_id: str
+    writer_label: str
+    focus_summary: str
+    title: str
+    slug: str = Field(..., pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    content_md: str = Field(..., min_length=100)
+    word_count: int = Field(..., ge=1)
+    brief_hash: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class JudgeScore(BaseModel):
+    """Single judge score for a topic or article."""
+
+    judge: str
+    score: float = Field(..., ge=0.0, le=10.0)
+    rationale: str = Field(..., min_length=5)
+    notes: list[str] = Field(default_factory=list)
+
+
+class DraftEvaluation(BaseModel):
+    """Aggregated scores for one draft variant."""
+
+    writer_id: str
+    scores: list[JudgeScore] = Field(default_factory=list)
+    average_score: float = Field(..., ge=0.0, le=10.0)
+    min_score: float = Field(..., ge=0.0, le=10.0)
+    score_variance: float = Field(default=0.0, ge=0.0, le=10.0)
+    passed: bool
+    notes: list[str] = Field(default_factory=list)
+
+
+class FinalQualityGate(BaseModel):
+    """Final publish gate result after optimization."""
+
+    round_number: int = Field(..., ge=1)
+    scores: list[JudgeScore] = Field(default_factory=list)
+    average_score: float = Field(..., ge=0.0, le=10.0)
+    min_score: float = Field(..., ge=0.0, le=10.0)
+    score_variance: float = Field(default=0.0, ge=0.0, le=10.0)
+    technical_accuracy_score: float = Field(..., ge=0.0, le=10.0)
+    passed: bool
+    notes: list[str] = Field(default_factory=list)
+
+
+class SectionExcerpt(BaseModel):
+    """Compact excerpt for one section in the article manifest."""
+
+    heading: str
+    excerpt: str
+    word_count: int = Field(default=0, ge=0)
+
+
+class ArticleManifest(BaseModel):
+    """Compact article representation used by optimizers and judges."""
+
+    title: str
+    slug: str
+    primary_keyword: str
+    opening_direct_answer: str = ""
+    heading_map: list[str] = Field(default_factory=list)
+    faq_questions: list[str] = Field(default_factory=list)
+    internal_links: list[str] = Field(default_factory=list)
+    claim_candidates: list[str] = Field(default_factory=list)
+    section_excerpts: list[SectionExcerpt] = Field(default_factory=list)
+    qa_snapshot: dict[str, Any] = Field(default_factory=dict)
+    seo_snapshot: dict[str, Any] = Field(default_factory=dict)
+    word_count: int = Field(default=0, ge=0)
+    meta_description: str = ""
+
+
+class SectionRewrite(BaseModel):
+    """Focused rewrite for one section heading."""
+
+    heading: str
+    markdown: str = Field(..., min_length=10)
+
+
+class OptimizationPatch(BaseModel):
+    """Structured patch plan returned by the optimizer coordinator."""
+
+    opening_direct_answer: Optional[str] = None
+    meta_description: Optional[str] = None
+    internal_link_suggestions: list[InternalLink] = Field(default_factory=list)
+    section_rewrites: list[SectionRewrite] = Field(default_factory=list)
+    faq_questions_to_strengthen: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class FactCheckReport(BaseModel):
+    """Final fact-check result using live web research."""
+
+    checked_claims: list[str] = Field(default_factory=list)
+    verified_claims: list[str] = Field(default_factory=list)
+    flagged_claims: list[str] = Field(default_factory=list)
+    required_revisions: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    passed: bool = True
 
 
 class SEOAEOScore(BaseModel):
@@ -311,9 +577,147 @@ class FinalArticle(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SourceCoverageReport(BaseModel):
+    """Coverage summary across research source classes."""
+
+    counts_by_class: dict[str, int] = Field(default_factory=dict)
+    missing_classes: list[str] = Field(default_factory=list)
+    unique_classes: int = Field(default=0, ge=0)
+    primary_technical_source_present: bool = False
+    score: float = Field(default=0.0, ge=0.0, le=10.0)
+    passed: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class ProviderCallUsage(BaseModel):
+    """Token usage for one provider/model call."""
+
+    stage: Optional[str] = None
+    provider: str
+    operation: str
+    model: str
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    web_search_used: bool = False
+    cached: bool = False
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class StageUsageSummary(BaseModel):
+    """Aggregated token usage for one pipeline stage."""
+
+    stage: str
+    call_count: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    web_search_calls: int = Field(default=0, ge=0)
+    cached_calls: int = Field(default=0, ge=0)
+
+
+class RunUsageLedger(BaseModel):
+    """Per-call and per-stage token usage for a full run."""
+
+    calls: list[ProviderCallUsage] = Field(default_factory=list)
+    stage_summaries: list[StageUsageSummary] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def total_input_tokens(self) -> int:
+        return sum(call.input_tokens for call in self.calls)
+
+    @computed_field
+    @property
+    def total_output_tokens(self) -> int:
+        return sum(call.output_tokens for call in self.calls)
+
+    @computed_field
+    @property
+    def total_tokens(self) -> int:
+        return sum(call.total_tokens for call in self.calls)
+
+
+class TopicCooldownRecord(BaseModel):
+    """Cooldown state for a previously published topic."""
+
+    slug: str
+    title: str
+    cluster: str
+    published_at: str
+    cooldown_until: str
+    keywords: list[str] = Field(default_factory=list)
+
+
+class TopicShortlistRecord(BaseModel):
+    """Shortlisted topics that were not selected in a prior run."""
+
+    slug: str
+    title: str
+    cluster: str
+    recorded_at: str
+    keywords: list[str] = Field(default_factory=list)
+    run_id: str
+
+
+class TopicReuseAssessment(BaseModel):
+    """Eligibility and penalty result for reusing a topic angle."""
+
+    slug: str
+    eligible: bool = True
+    penalty: float = Field(default=0.0, ge=0.0, le=10.0)
+    reasons: list[str] = Field(default_factory=list)
+    cooldown_until: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
-# Run tracking
+# Run tracking and resumable execution
 # ---------------------------------------------------------------------------
+
+
+class ExecutionState(BaseModel):
+    """Durable execution state for one dashboard-triggered run."""
+
+    run_id: str
+    status: str = Field(
+        default="running",
+        pattern=r"^(running|stopping|interrupted|resumable|resuming|completed|failed|canceled)$",
+    )
+    current_stage: Optional[str] = None
+    next_stage: Optional[str] = None
+    completed_stages: list[str] = Field(default_factory=list)
+    resume_stage: Optional[str] = None
+    resume_count: int = Field(default=0, ge=0)
+    worker_pid: Optional[int] = Field(default=None, ge=1)
+    worker_create_time: Optional[float] = Field(default=None, ge=0.0)
+    stop_requested: bool = False
+    started_at: datetime
+    last_heartbeat_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_error: Optional[str] = None
+    resume_reason: Optional[str] = None
+
+
+class StageCheckpoint(BaseModel):
+    """Checkpoint captured after a stage completes successfully."""
+
+    stage: str
+    completed_at: datetime
+    attempt: int = Field(default=1, ge=1)
+    ctx_fragment: dict[str, Any] = Field(default_factory=dict)
+    stage_result: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResumePlan(BaseModel):
+    """Computed resume cursor for an interrupted run."""
+
+    run_id: str
+    resumable: bool = False
+    resume_stage: Optional[str] = None
+    completed_stages: list[str] = Field(default_factory=list)
+    resume_count: int = Field(default=0, ge=0)
+    resume_reason: Optional[str] = None
+    ctx: dict[str, Any] = Field(default_factory=dict)
+    resumed_from_stage: Optional[str] = None
 
 
 class StageResult(BaseModel):
@@ -333,6 +737,8 @@ class RunSummary(BaseModel):
     run_id: str
     started_at: datetime
     completed_at: Optional[datetime] = None
+    resume_count: int = Field(default=0, ge=0)
+    resumed_from_stage: Optional[str] = None
     stages: list[StageResult] = Field(default_factory=list)
     topic_selected: Optional[str] = None
     final_score: Optional[float] = None
@@ -379,6 +785,8 @@ class RunSummary(BaseModel):
             "grade": self.final_grade,
             "word_count": self.word_count,
             "duration_seconds": self.total_duration_seconds,
+            "resume_count": self.resume_count,
+            "resumed_from_stage": self.resumed_from_stage,
             "stages_completed": self.stages_completed,
             "stages_failed": self.stages_failed,
             "error_count": len(self.errors),

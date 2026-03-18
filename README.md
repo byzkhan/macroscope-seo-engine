@@ -1,317 +1,379 @@
 # Macroscope SEO Engine
 
-Multi-agent content orchestration system that produces one high-quality SEO/AEO-focused blog per day for [macroscope.com](https://macroscope.com).
+Macroscope SEO Engine is a stateless, multi-stage content pipeline that researches, selects, writes, optimizes, fact-checks, and exports technically serious blog posts for Macroscope.
 
-## Architecture
+It is built for engineering audiences, not generic marketing content. The system uses multiple specialized subagents, durable run artifacts, explicit quality gates, and a dashboard that can start, stop, inspect, and now resume interrupted runs from the same stage boundary.
 
+## What The System Does
+
+One pipeline run:
+- bootstraps a fresh run context with no hidden memory
+- gathers technical market signals from multiple source classes
+- generates and scores candidate topics through a strict funnel
+- builds a structured research brief
+- creates writer blueprints and expands the best one into a full draft
+- optimizes the draft until it clears a final `9.0` publication gate
+- fact-checks the final article
+- exports markdown and JSON artifacts
+- persists archive history so published topics get cooldowns instead of permanent exclusion
+
+## Current Architecture
+
+```text
+CLI / Dashboard
+    |
+    v
+PipelineOrchestrator
+    |
+    +--> durable execution journal
+    |      - events.jsonl
+    |      - execution_state.json
+    |      - checkpoints/*.json
+    |
+    +--> ensemble stages
+    |      - research scouts
+    |      - topic judges
+    |      - blueprint writers
+    |      - optimizer jury
+    |      - final fact check
+    |
+    +--> providers
+           - market signals
+           - content generation
+           - keyword / SERP data
+           - export
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        CLI (app/main.py)                        │
-│                   click commands + JSON mode                    │
-├─────────────────────────────────────────────────────────────────┤
-│                   Orchestrator (app/orchestrator.py)            │
-│              controls all stages sequentially                   │
-├──────────┬──────────┬──────────┬──────────┬─────────────────────┤
-│ Provider │ Provider │ Provider │ Provider │                     │
-│ Market   │ Keyword  │ Doc      │ Content  │  ProviderRegistry   │
-│ Signals  │ Data     │ Export   │ Gen      │  (app/providers.py) │
-├──────────┴──────────┴──────────┴──────────┴─────────────────────┤
-│                                                                 │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌──────────┐          │
-│  │Scoring  │  │QA       │  │Storage  │  │Prompts   │  Core    │
-│  │Engine   │  │Engine   │  │Layer    │  │Templates │  Modules │
-│  └─────────┘  └─────────┘  └─────────┘  └──────────┘          │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│                    Schemas (app/schemas.py)                     │
-│              Pydantic models — data contracts                   │
-└─────────────────────────────────────────────────────────────────┘
+
+## End-To-End Flow
+
+```text
+bootstrap_run
+  -> collect_signals
+  -> generate_topics
+  -> score_topics
+  -> build_brief
+  -> write_draft
+  -> qa_optimize
+  -> fact_check
+  -> export
+  -> persist_history
 ```
 
-### Pipeline
+## Stage-By-Stage Architecture
 
+### 1. `bootstrap_run`
+- Creates the immutable `RunContext`.
+- Freezes quality policy, source policy, and agent manifest for the run.
+- Enforces stateless execution rules.
+
+Artifacts:
+- `run_context.json`
+- `quality_policy.json`
+- `source_policy.json`
+- `agent_manifest.json`
+
+### 2. `collect_signals`
+- Uses three bundled research scouts instead of many expensive parallel search passes:
+  - `community_scout`
+  - `primary_source_scout`
+  - `practitioner_scout`
+- Merges those into one reusable `ResearchPacket`.
+- Research is the main stage allowed to use web search.
+
+Artifacts:
+- `market_signals.json`
+- `research/raw/*.json`
+- `research/source_coverage_report.json`
+- `research/research_packet.json`
+
+### 3. `generate_topics`
+- Uses multiple topic personas, but inside a strict cap.
+- Candidate generation is merged and deduped, then hard-capped at `12` candidates.
+- Topics are filtered against shortlist history and cooldown policy.
+
+Artifacts:
+- `topic_candidates.json`
+- `topics/raw/*.json`
+- `topics/topic_novelty_report.json`
+
+### 4. `score_topics`
+- Runs cheap deterministic scoring across all capped candidates.
+- Only the top `6` topics get model-backed judging.
+- Only the top `2` get the full topic jury.
+- Tie-breakers run only when disagreement is high.
+
+Artifacts:
+- `scored_topics.json`
+- `selected_topic.json`
+- `scoring/topic_scorecards.json`
+
+### 5. `build_brief`
+- Uses a bundled brief composer instead of many expensive specialist passes.
+- Can fall back to a critic/revision pass if brief quality is below threshold.
+- Produces a structured `ResearchBrief` with outline, entities, FAQ, links, claims, CTA, and metadata.
+
+Artifacts:
+- `brief/research_brief.json`
+- `brief/brief_quality_report.json`
+- `brief/attempt_*.json`
+
+### 6. `write_draft`
+- Creates multiple low-token writer blueprints first.
+- Scores those blueprints locally.
+- Expands only the winning blueprint into a full draft by default.
+- A second full draft is unlocked only after later optimization rounds if quality is still too low.
+
+Artifacts:
+- `drafts/blueprints/*.json`
+- `drafts/blueprint_scorecards.json`
+- `drafts/selected_blueprint.json`
+- `draft.md`
+- `draft_meta.json`
+
+### 7. `qa_optimize`
+- Builds an `ArticleManifest` instead of re-judging the full raw markdown every round.
+- Uses a coordinator + patch loop, then targeted rewrites only where necessary.
+- Final publication gate stays strict:
+  - average score `>= 9.0`
+  - min judge `>= 8.0`
+  - technical rigor `>= 9.0`
+- The loop continues until the article passes or the user stops the run.
+
+Artifacts:
+- `optimization/article_manifest_round_*.json`
+- `optimization/pass_*.md`
+- `optimization/final_quality_gate_round_*.json`
+- `article_manifest.json`
+- `qa_result.json`
+- `optimized_draft.md`
+- `final.md`
+- `meta.json`
+
+### 8. `fact_check`
+- Runs one final manifest-based fact check.
+- This is the second stage, after research, that is allowed to use web search.
+
+Artifacts:
+- `fact_check_report.json`
+
+### 9. `export`
+- Writes the final markdown and JSON export locally.
+- External export providers are pluggable.
+- Local export overwrites safely, which makes stage-boundary resume safe.
+
+Artifacts:
+- `<slug>.md`
+- `<slug>.json`
+- `export_results.json`
+
+### 10. `persist_history`
+- Adds the final topic to history.
+- Applies cooldown behavior rather than permanently killing similar strong topics.
+
+## Guardrails And Quality Model
+
+The pipeline is designed to prevent hidden context bleed and low-quality content:
+
+- Every run starts with a fresh `RunContext`.
+- Downstream stages only consume explicit artifacts, not implicit conversation memory.
+- Provider calls are stateless.
+- Topic reuse is controlled by cooldowns and shortlist memory.
+- Final publication requires the optimizer jury gate to pass.
+- The user can stop a live run from the dashboard.
+
+## Token-Reduction Design
+
+The current implementation intentionally reduces token burn without changing the default model:
+
+- `3` bundled research scouts instead of a larger search fan-out
+- one reusable `ResearchPacket` for downstream stages
+- capped topic funnel: `12` candidates -> `6` judged -> `2` full-panel topics
+- writer blueprints first, one full draft by default
+- `ArticleManifest`-based judging instead of repeatedly sending the full article everywhere
+- `RunUsageLedger` persisted per run
+
+Artifacts:
+- `usage/run_usage_ledger.json`
+
+## Resumable Runs
+
+Interrupted dashboard runs are now durable and manually resumable.
+
+### How it works
+- Dashboard runs execute in a dedicated subprocess, not an in-memory thread.
+- Each completed stage writes a checkpoint under `checkpoints/`.
+- Each run also writes `execution_state.json`.
+- If the dashboard process or machine dies, the next dashboard startup reconciles the old run:
+  - live worker still exists -> run remains active
+  - worker is gone -> run becomes `Interrupted`
+- Resume restarts from the same stage boundary, not from the middle of an API call.
+
+### Important limitation
+- Only runs created after this checkpoint system was added are resumable.
+- Older incomplete runs are shown as `Interrupted` but not `Resumable`.
+
+## Dashboard
+
+Launch the dashboard:
+
+```bash
+python -m app.main dashboard
 ```
-Market Signals ──► Topic Candidates ──► Score & Select ──► Research Brief
-                                                               │
-     Export ◄── SEO/AEO QA ◄── Write Draft ◄──────────────────┘
-       │
-       └──► Persist to Archive
+
+Open:
+
+```text
+http://127.0.0.1:8051
+```
+
+The dashboard supports:
+- `Run pipeline`
+- `Stop run`
+- `Resume run` for checkpointed interrupted runs
+- recent runs with status
+- expandable stage cards
+- final markdown export from the last stage
+
+Status model:
+- `Running`
+- `Stopping`
+- `Resuming`
+- `Interrupted`
+- `Completed`
+- `Failed`
+- `Canceled`
+
+## CLI Commands
+
+### Full run
+
+```bash
+python -m app.main run
+python -m app.main --json run
+```
+
+### Resume an interrupted run
+
+```bash
+python -m app.main resume --run-id 2026-03-18_123456
+```
+
+### Dashboard
+
+```bash
+python -m app.main dashboard
+```
+
+### List runs
+
+```bash
+python -m app.main list-runs
 ```
 
 ## Setup
 
 ```bash
-# Clone and enter project
 cd macroscope-seo-engine
-
-# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate
-
-# Install with dev dependencies
 pip install -e ".[dev]"
 ```
 
-## Usage
+## OpenAI Configuration
 
-### Full pipeline run
+Real runs are expected to use OpenAI, not mock mode.
 
-```bash
-# Interactive mode (rich console output)
-python -m app.main run
-
-# Headless / CI mode (JSON output only)
-python -m app.main --json run
-
-# Verbose logging
-python -m app.main -v run
-```
-
-### Individual commands
+Use a project `.env` or shell environment:
 
 ```bash
-# Score and rank topics (stages 1-3)
-python -m app.main score-topics
-
-# List past runs
-python -m app.main list-runs
-
-# Export a run's final article
-python -m app.main export --run-id 2026-03-12_143022
+OPENAI_API_KEY=sk-...
+SEO_ENGINE_PROVIDER=openai
 ```
 
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Pipeline error (non-fatal stage failure) |
-| 2 | Fatal error (pipeline aborted) |
-| 3 | Configuration error |
-
-### CI / Scheduler integration
+Optional tuning:
 
 ```bash
-# Cron job or CI step
-python -m app.main --json run > /tmp/seo-run.json 2>/dev/null
-EXIT_CODE=$?
-if [ $EXIT_CODE -ne 0 ]; then
-  echo "Pipeline failed with exit code $EXIT_CODE"
-  cat /tmp/seo-run.json
-fi
+OPENAI_MODEL=gpt-5-mini
+OPENAI_MARKET_MODEL=gpt-5-mini
+OPENAI_CONTENT_MODEL=gpt-5-mini
+OPENAI_REASONING_EFFORT=medium
+OPENAI_ENABLE_WEB_SEARCH=true
+OPENAI_SEARCH_CONTEXT_SIZE=medium
 ```
 
-## Pipeline Stages
+The dashboard and CLI will now refuse to silently fall back to mock mode for real runs.
 
-| # | Stage | Input | Output | Fatal? |
-|---|-------|-------|--------|--------|
-| 1 | Collect Signals | Market themes | `MarketSignalReport` | No |
-| 2 | Generate Topics | Signals + archive | `list[TopicCandidate]` | No |
-| 3 | Score Topics | Candidates + archive | `ScoredTopic` (selected) | **Yes** |
-| 4 | Build Brief | Selected topic | `ResearchBrief` | **Yes** |
-| 5 | Write Draft | Brief | `DraftArticle` | **Yes** |
-| 6 | QA + Optimize | Draft + brief | `FinalArticle` + `SEOAEOScore` | No |
-| 7 | Export | Final article | Markdown + JSON files | No |
-| 8 | Persist History | Final article | Updated archive | No |
+## Configuration Surface
 
-## Scoring Weights
+The main runtime configuration lives in:
+- [config/brand_context.md](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/brand_context.md)
+- [config/style_guide.md](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/style_guide.md)
+- [config/seo_rules.md](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/seo_rules.md)
+- [config/aeo_rules.md](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/aeo_rules.md)
+- [config/topic_clusters.yaml](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/topic_clusters.yaml)
+- [config/competitors.yaml](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/competitors.yaml)
+- [config/forbidden_claims.yaml](/Users/zaid/Documents/Playground/macroscope-seo-engine/config/forbidden_claims.yaml)
 
-| Criterion | Max Score | Description |
-|-----------|-----------|-------------|
-| Business Relevance | 25 | Alignment with Macroscope's product |
-| Search Opportunity | 20 | Search volume and ranking potential |
-| AEO Fit | 15 | Featured snippet / AI citation potential |
-| Freshness | 10 | Timeliness, news hooks |
-| Authority to Win | 15 | Can Macroscope credibly own this? |
-| Uniqueness vs Archive | 10 | Differentiation from published content |
-| Production Ease | 5 | Can this be produced quickly? |
+Important runtime knobs come from env/config loading in [app/config.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/config.py):
+- topic funnel caps
+- writer blueprint count
+- final fact-check toggle
+- web-search stages
+- quality thresholds
+- optimizer behavior
 
-Topics scoring below 45/100 are auto-rejected.
+## Run Directory Layout
 
-## Configuration
+Each run lives under:
 
-All config lives in `config/`:
-
-| File | Purpose |
-|------|---------|
-| `brand_context.md` | Macroscope brand positioning and voice |
-| `style_guide.md` | Content formatting and writing rules |
-| `seo_rules.md` | SEO technical requirements |
-| `aeo_rules.md` | Answer Engine Optimization rules |
-| `competitors.yaml` | Competitor domains and focus areas |
-| `topic_clusters.yaml` | Topic cluster definitions and keywords |
-| `forbidden_claims.yaml` | Claims that must not appear in content |
-
-## Provider Architecture
-
-External integrations are behind abstract interfaces in `app/providers.py`. The engine ships with mock providers — no API keys or external services needed to run.
-
-```python
-from app.providers import ProviderRegistry, MockMarketSignalProvider
-
-# Default: all mocks
-registry = ProviderRegistry()
-
-# Swap one provider for a real implementation
-registry = ProviderRegistry(
-    market_signals=RealHackerNewsProvider(api_key="..."),
-    # other providers remain mocked
-)
+```text
+data/runs/<run_id>/
 ```
 
-### Integration seam documentation
+Typical contents:
 
-| Provider | Interface | Mock | Real Implementation Notes |
-|----------|-----------|------|--------------------------|
-| Market Signals | `MarketSignalProvider` | `MockMarketSignalProvider` | HN Algolia API, Reddit API, or MCP servers |
-| Keyword Data | `KeywordDataProvider` | `MockKeywordDataProvider` | Google Search Console API, Ahrefs, SEMrush |
-| Document Export | `DocumentExportProvider` | `MockGoogleDocsProvider` | Google Docs API, Notion API, or MCP servers |
-| Content Generation | `ContentGenerationProvider` | `MockContentGenerationProvider` | Anthropic SDK (claude-opus-4-6 / claude-sonnet-4-6) |
+```text
+events.jsonl
+execution_state.json
+checkpoints/
+run_context.json
+market_signals.json
+topic_candidates.json
+scored_topics.json
+brief/
+drafts/
+optimization/
+fact_check_report.json
+export_results.json
+run_summary.json
+usage/run_usage_ledger.json
+```
 
 ## Testing
 
+Run the full suite:
+
 ```bash
-# Run all tests
 pytest
-
-# With coverage
-pytest --cov=app --cov-report=term-missing
-
-# Specific test file
-pytest tests/test_scoring.py -v
 ```
 
-Tests cover:
-- **Scoring**: Weight validation, generic detection, archive deduplication, ranking, selection
-- **Schemas**: Pydantic validation, computed fields, field constraints, normalization
-- **QA**: All individual checks, SEO/AEO scoring, full QA suite
+Current coverage areas include:
+- topic funnel and token-reduction behavior
+- provider selection and runtime config
+- dashboard stale-state handling
+- stop/resume runtime behavior
+- checkpoint and resume planning
+- QA/SEO scoring and optimizer patching
 
-## Claude Code Integration
+## Implementation Notes
 
-### Custom Commands (`.claude/commands/`)
-- `daily-blog` — Execute a full pipeline run
-- `score-topics` — Score and rank topic candidates
-- `run-research` — Build a research brief for a specific topic
-- `export-doc` — Export a completed run for publishing
+Core modules:
+- [app/orchestrator.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/orchestrator.py): main stage execution
+- [app/storage.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/storage.py): artifacts, execution journal, checkpoints
+- [app/dashboard_runtime.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/dashboard_runtime.py): subprocess worker management and UI read models
+- [app/openai_providers.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/openai_providers.py): OpenAI-backed providers
+- [app/providers.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/providers.py): provider interfaces and mock implementations
+- [app/schemas.py](/Users/zaid/Documents/Playground/macroscope-seo-engine/app/schemas.py): typed contracts
 
-### Skills (`.claude/skills/`)
-- `serp-audit` — Analyze SERP landscape for a keyword
-- `competitor-gap` — Find untapped topics vs. competitors
-- `faq-extractor` — Extract FAQs from search/forum data
-- `internal-linker` — Suggest internal links from existing content
-
-### Agents (`.claude/agents/`)
-- `topic-researcher` — Generates 15-25 topic candidates
-- `market-watcher` — Monitors market signals
-- `topic-scorer` — Ranks topics with weighted scoring
-- `research-brief-writer` — Produces comprehensive briefs
-- `blog-writer` — Writes markdown articles from briefs
-- `seo-aeo-editor` — Optimizes for search and answer engines
-- `publisher` — Exports and publishes final content
-
-## What's Mocked
-
-The pipeline runs end-to-end without external APIs. All mock data is realistic and domain-specific:
-
-| Component | What's Mocked | What's Real |
-|-----------|---------------|-------------|
-| Market signals | 5 synthetic signals about AI code review trends | Signal aggregation logic |
-| Topic generation | 18 pre-built candidates across 6 clusters | - |
-| Topic scoring | Raw scores derived from candidate metadata | Scoring engine, archive dedup, generic detection |
-| Research brief | Complete brief with outline, FAQs, entities | - |
-| Draft article | ~1,800-word article about AI code review vs linters | - |
-| SEO/AEO scoring | - | Full heuristic scoring engine (10 dimensions) |
-| QA checks | - | All 9 QA checks run against real content |
-| Export | Local markdown/JSON (real), Google Docs (placeholder) | File I/O, frontmatter generation |
-
-## Productionization Roadmap
-
-### Phase 1: Real Content Generation
-- [ ] Implement `ContentGenerationProvider` using Anthropic SDK (claude-sonnet-4-6 for drafts, claude-opus-4-6 for editing)
-- [ ] Add structured output parsing for topic candidates and research briefs
-- [ ] Add retry logic with tenacity for LLM API calls
-- [ ] Add cost tracking per run (token usage)
-
-### Phase 2: Real Market Data
-- [ ] Implement `MarketSignalProvider` with Hacker News Algolia API
-- [ ] Add Reddit API integration for r/programming, r/ExperiencedDevs
-- [ ] Implement `KeywordDataProvider` with Google Search Console API
-- [ ] Add keyword volume data from Ahrefs or SEMrush API
-
-### Phase 3: Publishing Pipeline
-- [ ] Implement `DocumentExportProvider` with Google Docs API
-- [ ] Add CMS integration (WordPress REST API or Ghost API)
-- [ ] Add Search Console indexing requests for new URLs
-- [ ] Add social media post generation for new articles
-
-### Phase 4: Feedback Loop
-- [ ] Track article performance via Search Console (impressions, clicks, position)
-- [ ] Feed performance data back into scoring weights
-- [ ] Auto-update topic_history.json with performance metrics
-- [ ] Identify underperforming content for refresh
-
-### Phase 5: Operational Hardening
-- [ ] Add structured logging with correlation IDs
-- [ ] Add Prometheus metrics for pipeline monitoring
-- [ ] Add alerting for pipeline failures
-- [ ] Add A/B testing for title options
-- [ ] Add human-in-the-loop approval step before publishing
-
-## Project Structure
-
-```
-macroscope-seo-engine/
-├── .claude/
-│   ├── settings.json              # Claude Code permissions
-│   ├── commands/                   # Custom slash commands
-│   │   ├── daily-blog.md
-│   │   ├── score-topics.md
-│   │   ├── run-research.md
-│   │   └── export-doc.md
-│   ├── skills/                     # Reusable skills
-│   │   ├── serp-audit/SKILL.md
-│   │   ├── competitor-gap/SKILL.md
-│   │   ├── faq-extractor/SKILL.md
-│   │   └── internal-linker/SKILL.md
-│   └── agents/                     # Subagent prompts
-│       ├── topic-researcher.md
-│       ├── market-watcher.md
-│       ├── topic-scorer.md
-│       ├── research-brief-writer.md
-│       ├── blog-writer.md
-│       ├── seo-aeo-editor.md
-│       └── publisher.md
-├── app/
-│   ├── __init__.py
-│   ├── main.py                     # CLI entrypoint
-│   ├── orchestrator.py             # Pipeline orchestration
-│   ├── schemas.py                  # Pydantic models
-│   ├── providers.py                # Provider interfaces + mocks
-│   ├── scoring.py                  # Topic scoring engine
-│   ├── qa.py                       # QA checks + SEO/AEO scoring
-│   ├── storage.py                  # Run persistence
-│   ├── prompts.py                  # Agent prompt templates
-│   ├── config.py                   # Configuration loading
-│   └── docs_export.py              # Local file export
-├── config/
-│   ├── brand_context.md
-│   ├── style_guide.md
-│   ├── seo_rules.md
-│   ├── aeo_rules.md
-│   ├── competitors.yaml
-│   ├── topic_clusters.yaml
-│   └── forbidden_claims.yaml
-├── data/
-│   ├── topic_history.json
-│   ├── archive/
-│   ├── runs/
-│   ├── keywords/
-│   └── signals/
-├── tests/
-│   ├── test_scoring.py
-│   ├── test_schemas.py
-│   └── test_qa.py
-├── pyproject.toml
-├── README.md
-└── CLAUDE.md
-```
+Longer design notes:
+- [docs/ensemble-pipeline-blueprint.md](/Users/zaid/Documents/Playground/macroscope-seo-engine/docs/ensemble-pipeline-blueprint.md)

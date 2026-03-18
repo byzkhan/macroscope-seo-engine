@@ -11,6 +11,8 @@ build/
 .venv/
 venv/
 env/
+.env
+.env.*
 
 # IDE
 .idea/
@@ -26,6 +28,10 @@ htmlcov/
 
 # Run data (keep structure, ignore outputs)
 data/runs/
+data/cache/
+data/ui/
+data/topic_cooldowns.json
+data/topic_shortlist_history.json
 
 # OS
 .DS_Store

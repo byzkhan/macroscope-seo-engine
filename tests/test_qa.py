@@ -15,6 +15,7 @@ from app.qa import (
     check_slug,
     check_title_length,
     check_word_count,
+    normalize_markdown_headings,
     run_qa,
     score_seo_aeo,
 )
@@ -140,6 +141,10 @@ class TestFAQSection:
     def test_alternative_heading_frequently_asked(self):
         assert check_has_faq_section("### Frequently Asked Questions\n\nContent.").passed is True
 
+    def test_setext_heading_is_recognized(self):
+        content = "# Title\n\nFAQ\n---\n\nAnswer."
+        assert check_has_faq_section(content).passed is True
+
 
 class TestDirectAnswer:
     def test_direct_answer_present(self):
@@ -188,6 +193,12 @@ class TestHeadingStructure:
         content = "# Title\n\n#### Jumped to H4\n\nContent."
         result = check_heading_structure(content)
         assert result.passed is False
+
+    def test_setext_headings_are_normalized(self):
+        content = "# Title\n\nSection\n-------\n\nBody.\n"
+        normalized = normalize_markdown_headings(content)
+        assert "## Section" in normalized
+        assert check_heading_structure(content).passed is True
 
 
 class TestInternalLinks:

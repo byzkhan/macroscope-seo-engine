@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Macroscope Pipeline Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="page-header">
+        <div class="header-copy">
+          <p class="eyebrow">Macroscope SEO Engine</p>
+          <h1>Pipeline stages</h1>
+          <p class="header-note">
+            Run the pipeline, watch each stage move from loading to done, and open any stage to inspect what happened.
+          </p>
+        </div>
+
+        <div class="header-controls">
+          <div class="status-card">
+            <span class="status-label">Status</span>
+            <strong id="system-status">Loading…</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Active run</span>
+            <strong id="active-run">None</strong>
+          </div>
+          <button id="run-now" class="primary-button">Run pipeline</button>
+          <button id="stop-run" class="danger-button">Stop run</button>
+          <button id="resume-run" class="secondary-button">Resume run</button>
+          <button id="refresh" class="secondary-button">Refresh</button>
+        </div>
+      </header>
+
+      <p id="flash-message" class="flash-message"></p>
+
+      <section class="panel runs-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Runs</p>
+            <h2>Recent runs</h2>
+          </div>
+          <p id="run-selection-note" class="panel-note">Select a run to inspect its stages.</p>
+        </div>
+        <div id="recent-runs" class="run-list"></div>
+      </section>
+
+      <section class="panel pipeline-panel">
+        <div class="panel-head panel-head--stacked">
+          <div>
+            <p class="eyebrow">Pipeline</p>
+            <h2 id="pipeline-title">Waiting for a run</h2>
+          </div>
+
+          <div class="run-summary">
+            <div class="summary-item">
+              <span>Topic</span>
+              <strong id="run-topic">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>Grade</span>
+              <strong id="run-grade">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>Words</span>
+              <strong id="run-words">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>Duration</span>
+              <strong id="run-duration">—</strong>
+            </div>
+          </div>
+        </div>
+
+        <p id="run-banner" class="run-banner" hidden></p>
+
+        <div id="stage-list" class="stage-list"></div>
+      </section>
+    </div>
+
+    <script>
+      const state = {
+        selectedRunId: null,
+        selectedRunDetail: null,
+        expandedStage: null,
+        status: null,
+      };
+
+      const els = {
+        systemStatus: document.getElementById("system-status"),
+        activeRun: document.getElementById("active-run"),
+        runNow: document.getElementById("run-now"),
+        stopRun: document.getElementById("stop-run"),
+        resumeRun: document.getElementById("resume-run"),
+        refresh: document.getElementById("refresh"),
+        flashMessage: document.getElementById("flash-message"),
+        recentRuns: document.getElementById("recent-runs"),
+        runSelectionNote: document.getElementById("run-selection-note"),
+        pipelineTitle: document.getElementById("pipeline-title"),
+        runTopic: document.getElementById("run-topic"),
+        runGrade: document.getElementById("run-grade"),
+        runWords: document.getElementById("run-words"),
+        runDuration: document.getElementById("run-duration"),
+        runBanner: document.getElementById("run-banner"),
+        stageList: document.getElementById("stage-list"),
+      };
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function truncate(value, maxLength = 220) {
+        const text = String(value ?? "").trim();
+        if (text.length <= maxLength) {
+          return text;
+        }
+        return `${text.slice(0, maxLength - 1).trimEnd()}…`;
+      }
+
+      function formatDuration(value) {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) {
+          return "—";
+        }
+        const numeric = Number(value);
+        if (numeric < 1) {
+          return `${Math.max(1, Math.round(numeric * 1000))}ms`;
+        }
+        if (numeric < 10) {
+          return `${numeric.toFixed(2)}s`;
+        }
+        return `${numeric.toFixed(1)}s`;
+      }
+
+      function showFlash(message, tone = "neutral") {
+        els.flashMessage.textContent = message;
+        els.flashMessage.dataset.tone = tone;
+      }
+
+      function normalizeErrorMessage(error) {
+        const raw = String(error?.message || error || "").trim();
+        if (!raw || raw === "Failed to fetch") {
+          return "Dashboard server is unavailable. Restart `./.venv/bin/python -m app.main dashboard` and refresh.";
+        }
+        return raw;
+      }
+
+      async function requestJson(url, options = {}) {
+        const response = await fetch(url, {
+          headers: { "Content-Type": "application/json" },
+          ...options,
+        });
+
+        if (!response.ok) {
+          let detail = `${response.status} ${response.statusText}`;
+          try {
+            const payload = await response.json();
+            detail = payload.detail || detail;
+          } catch (_error) {
+            // Ignore JSON parsing issues on error responses.
+          }
+          throw new Error(detail);
+        }
+
+        return response.json();
+      }
+
+      function chooseRunId(status) {
+        const available = new Set((status.recent_runs || []).map((run) => run.run_id));
+        if (state.selectedRunId && (available.has(state.selectedRunId) || state.selectedRunId === status.active_run_id)) {
+          return state.selectedRunId;
+        }
+        return status.active_run_id || status.recent_runs?.[0]?.run_id || null;
+      }
+
+      function defaultExpandedStage(stageViews) {
+        const running = stageViews.find((stage) => stage.status === "running");
+        if (running) {
+          return running.stage;
+        }
+        const failed = stageViews.find((stage) => stage.status === "failed");
+        if (failed) {
+          return failed.stage;
+        }
+        const completed = [...stageViews].reverse().find((stage) => stage.status === "success");
+        return completed ? completed.stage : stageViews[0]?.stage ?? null;
+      }
+
+      function basename(path) {
+        return String(path || "").split("/").pop() || "";
+      }
+
+      function statusIcon(status) {
+        if (status === "running") {
+          return '<span class="stage-icon stage-icon--spinner" aria-hidden="true"></span>';
+        }
+        if (status === "success") {
+          return '<span class="stage-icon stage-icon--success" aria-hidden="true">✓</span>';
+        }
+        if (status === "canceled") {
+          return '<span class="stage-icon stage-icon--canceled" aria-hidden="true">■</span>';
+        }
+        if (status === "failed") {
+          return '<span class="stage-icon stage-icon--failed" aria-hidden="true">!</span>';
+        }
+        return '<span class="stage-icon stage-icon--pending" aria-hidden="true"></span>';
+      }
+
+      function statusLabel(status) {
+        if (status === "running") return "Running";
+        if (status === "resuming") return "Resuming";
+        if (status === "stopping") return "Stopping";
+        if (status === "success") return "Done";
+        if (status === "canceled") return "Stopped";
+        if (status === "failed") return "Failed";
+        if (status === "interrupted") return "Interrupted";
+        return "Waiting";
+      }
+
+      function renderRecentRuns() {
+        const runs = state.status?.recent_runs || [];
+        els.recentRuns.innerHTML = "";
+
+        if (!runs.length) {
+          els.recentRuns.innerHTML = '<p class="empty-state">No runs yet.</p>';
+          return;
+        }
+
+        runs.forEach((run) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `run-card${run.run_id === state.selectedRunId ? " is-selected" : ""}`;
+          button.innerHTML = `
+            <div class="run-card-top">
+              <span class="run-id">${escapeHtml(run.run_id)}</span>
+              <span class="run-grade">${escapeHtml(run.grade || (run.status === "failed" ? "Failed" : run.status === "canceled" ? "Stopped" : run.status === "interrupted" ? "Interrupted" : run.status === "resuming" ? "Resuming" : run.status === "stopping" ? "Stopping" : "—"))}</span>
+            </div>
+            <strong class="run-topic">${escapeHtml(truncate(run.topic || "Untitled run", 90))}</strong>
+            <div class="run-meta">
+              <span>${run.word_count ? `${escapeHtml(run.word_count)} words` : "No word count"}</span>
+              <span>${escapeHtml(run.status === "running" ? "Running" : run.status === "resuming" ? "Resuming" : run.status === "stopping" ? "Stopping" : run.status === "completed" ? "Completed" : run.status === "canceled" ? "Stopped" : run.status === "interrupted" ? "Interrupted" : "Failed")}</span>
+            </div>
+          `;
+          button.addEventListener("click", async () => {
+            state.selectedRunId = run.run_id;
+            state.selectedRunDetail = null;
+            await loadDashboard();
+          });
+          els.recentRuns.appendChild(button);
+        });
+      }
+
+      function renderHeader() {
+        const status = state.status || {};
+        const running = Boolean(status.running);
+        const stopRequested = Boolean(status.stop_requested);
+        const detailStatus = state.selectedRunDetail?.status || state.selectedRunDetail?.summary?.status;
+        els.systemStatus.textContent = stopRequested
+          ? "Stopping"
+          : running
+            ? (detailStatus === "resuming" ? "Resuming" : "Running")
+            : "Idle";
+        els.activeRun.textContent = status.active_run_id || "None";
+        els.runNow.disabled = running;
+        els.stopRun.disabled = !running || stopRequested;
+        els.stopRun.textContent = stopRequested ? "Stopping…" : "Stop run";
+        const resumable = Boolean(state.selectedRunDetail?.resumable);
+        els.resumeRun.disabled = running || !resumable;
+        els.runSelectionNote.textContent = state.selectedRunId
+          ? `Showing ${state.selectedRunId}`
+          : "Select a run to inspect its stages.";
+      }
+
+      function renderPipelineSummary() {
+        const detail = state.selectedRunDetail;
+        const summary = detail?.summary || {};
+        const selected = detail?.selected_topic?.candidate || {};
+        els.pipelineTitle.textContent = detail ? `Run ${detail.run_id}` : "Waiting for a run";
+        els.runTopic.textContent = selected.title || summary.topic_selected || (summary.success === false ? "No topic selected" : "—");
+        els.runGrade.textContent = summary.final_grade || (summary.success === false ? "Failed" : "—");
+        els.runWords.textContent = summary.word_count ? `${summary.word_count}` : "—";
+        els.runDuration.textContent = summary.total_duration_seconds
+          ? formatDuration(summary.total_duration_seconds)
+          : "—";
+        if (summary.success === false && Array.isArray(summary.errors) && summary.errors.length) {
+          els.runBanner.hidden = false;
+          els.runBanner.textContent = summary.errors[0];
+        } else {
+          els.runBanner.hidden = true;
+          els.runBanner.textContent = "";
+        }
+      }
+
+      function buildStageDetail(stage, index, totalStages) {
+        const detail = state.selectedRunDetail;
+        const isExpanded = state.expandedStage === stage.stage;
+        const isLastStage = index === totalStages - 1;
+        const articleName = basename(detail?.article_path);
+        const canExport = isLastStage && detail?.article_path && articleName;
+        const articlePreview = detail?.article_preview ? truncate(detail.article_preview, 1800) : "";
+        const artifactName = stage.artifact_path ? basename(stage.artifact_path) : "";
+        const traces = stage.traces || [];
+
+        return `
+          <article class="stage-card stage-card--${stage.status} ${isExpanded ? "is-expanded" : ""}">
+            <button
+              type="button"
+              class="stage-toggle"
+              data-stage="${escapeHtml(stage.stage)}"
+              aria-expanded="${isExpanded ? "true" : "false"}"
+            >
+              <span class="stage-index">${index + 1}</span>
+              ${statusIcon(stage.status)}
+              <div class="stage-main">
+                <div class="stage-heading">
+                  <strong>${escapeHtml(stage.label)}</strong>
+                  <span>${escapeHtml(stage.agent)}</span>
+                </div>
+                <p class="stage-description">${escapeHtml(stage.description)}</p>
+              </div>
+              <div class="stage-summary">
+                <span class="stage-state">${statusLabel(stage.status)}</span>
+                <span class="stage-duration">${formatDuration(stage.duration_seconds)}</span>
+              </div>
+            </button>
+
+            <div class="stage-panel" ${isExpanded ? "" : "hidden"}>
+              <div class="detail-grid">
+                <div class="detail-box">
+                  <span>Status</span>
+                  <strong>${statusLabel(stage.status)}</strong>
+                </div>
+                <div class="detail-box">
+                  <span>Duration</span>
+                  <strong>${formatDuration(stage.duration_seconds)}</strong>
+                </div>
+                <div class="detail-box">
+                  <span>Artifact</span>
+                  <strong>${escapeHtml(artifactName || "None yet")}</strong>
+                </div>
+                <div class="detail-box">
+                  <span>Agent</span>
+                  <strong>${escapeHtml(stage.agent)}</strong>
+                </div>
+              </div>
+
+              ${
+                stage.latest_preview
+                  ? `
+                    <section class="detail-section">
+                      <h3>Latest preview</h3>
+                      <div class="detail-text">${escapeHtml(stage.latest_preview)}</div>
+                    </section>
+                  `
+                  : ""
+              }
+
+              ${
+                stage.latest_prompt
+                  ? `
+                    <section class="detail-section">
+                      <h3>Prompt summary</h3>
+                      <div class="detail-text">${escapeHtml(stage.latest_prompt)}</div>
+                    </section>
+                  `
+                  : ""
+              }
+
+              ${
+                traces.length
+                  ? `
+                    <section class="detail-section">
+                      <h3>What happened</h3>
+                      <ul class="trace-list">
+                        ${traces
+                          .map(
+                            (trace) => `
+                              <li class="trace-item">
+                                <strong>${escapeHtml(trace.message || "Stage update")}</strong>
+                                ${
+                                  trace.preview
+                                    ? `<span>${escapeHtml(truncate(trace.preview, 240))}</span>`
+                                    : ""
+                                }
+                              </li>
+                            `
+                          )
+                          .join("")}
+                      </ul>
+                    </section>
+                  `
+                  : ""
+              }
+
+              ${
+                stage.error
+                  ? `
+                    <section class="detail-section detail-section--error">
+                      <h3>Error</h3>
+                      <div class="detail-text">${escapeHtml(stage.error)}</div>
+                    </section>
+                  `
+                  : ""
+              }
+
+              ${
+                canExport
+                  ? `
+                    <section class="detail-section final-output">
+                      <div class="final-output-head">
+                        <div>
+                          <h3>Final blog</h3>
+                          <p>Export the markdown for the finished article.</p>
+                        </div>
+                        <a
+                          class="export-button"
+                          href="/api/runs/${encodeURIComponent(detail.run_id)}/download/${encodeURIComponent(articleName)}"
+                        >
+                          Export Markdown
+                        </a>
+                      </div>
+                      ${
+                        articlePreview
+                          ? `<pre class="article-preview">${escapeHtml(articlePreview)}</pre>`
+                          : ""
+                      }
+                    </section>
+                  `
+                  : ""
+              }
+            </div>
+          </article>
+        `;
+      }
+
+      function renderStages() {
+        const detail = state.selectedRunDetail;
+        if (!detail) {
+          els.stageList.innerHTML = '<p class="empty-state">Start a run to see the stage boxes here.</p>';
+          return;
+        }
+
+        const stages = detail.stage_views || [];
+        els.stageList.innerHTML = stages.map((stage, index) => buildStageDetail(stage, index, stages.length)).join("");
+
+        Array.from(document.querySelectorAll(".stage-toggle")).forEach((button) => {
+          button.addEventListener("click", () => {
+            const stageName = button.dataset.stage;
+            state.expandedStage = state.expandedStage === stageName ? null : stageName;
+            renderStages();
+          });
+        });
+      }
+
+      async function loadRunDetail(runId) {
+        if (!runId) {
+          state.selectedRunDetail = null;
+          return;
+        }
+
+        try {
+          const detail = await requestJson(`/api/runs/${encodeURIComponent(runId)}`);
+          state.selectedRunDetail = detail;
+          const availableStages = detail.stage_views || [];
+          if (!state.expandedStage || !availableStages.some((stage) => stage.stage === state.expandedStage)) {
+            state.expandedStage = defaultExpandedStage(availableStages);
+          }
+        } catch (error) {
+          state.selectedRunDetail = null;
+          showFlash(normalizeErrorMessage(error), "error");
+        }
+      }
+
+      function renderAll() {
+        renderHeader();
+        renderRecentRuns();
+        renderPipelineSummary();
+        renderStages();
+      }
+
+      async function loadDashboard() {
+        try {
+          state.status = await requestJson("/api/status");
+          const nextRunId = chooseRunId(state.status);
+          const shouldReloadDetail =
+            nextRunId !== state.selectedRunId ||
+            !state.selectedRunDetail ||
+            (state.status.running && nextRunId === state.status.active_run_id);
+
+          state.selectedRunId = nextRunId;
+
+          if (shouldReloadDetail) {
+            await loadRunDetail(nextRunId);
+          }
+
+          renderAll();
+        } catch (error) {
+          showFlash(normalizeErrorMessage(error), "error");
+        }
+      }
+
+      els.runNow.addEventListener("click", async () => {
+        try {
+          showFlash("Starting pipeline run…");
+          const payload = await requestJson("/api/runs/start", {
+            method: "POST",
+            body: JSON.stringify({ trigger: "manual" }),
+          });
+          state.status = payload;
+          state.selectedRunId = payload.active_run_id || state.selectedRunId;
+          state.selectedRunDetail = null;
+          showFlash("Pipeline run started.", "success");
+          await loadDashboard();
+        } catch (error) {
+          showFlash(normalizeErrorMessage(error), "error");
+        }
+      });
+
+      els.stopRun.addEventListener("click", async () => {
+        try {
+          showFlash("Stop requested. The current model call will finish, then the run will halt.", "success");
+          const payload = await requestJson("/api/runs/stop", {
+            method: "POST",
+          });
+          state.status = payload;
+          await loadDashboard();
+        } catch (error) {
+          showFlash(normalizeErrorMessage(error), "error");
+        }
+      });
+
+      els.resumeRun.addEventListener("click", async () => {
+        if (!state.selectedRunId) {
+          return;
+        }
+        try {
+          showFlash("Resuming interrupted run…");
+          const payload = await requestJson(`/api/runs/${encodeURIComponent(state.selectedRunId)}/resume`, {
+            method: "POST",
+          });
+          state.status = payload;
+          state.selectedRunDetail = null;
+          showFlash("Run resumed.", "success");
+          await loadDashboard();
+        } catch (error) {
+          showFlash(normalizeErrorMessage(error), "error");
+        }
+      });
+
+      els.refresh.addEventListener("click", async () => {
+        showFlash("Refreshing…");
+        await loadDashboard();
+        showFlash("Dashboard updated.");
+      });
+
+      loadDashboard();
+      setInterval(loadDashboard, 3000);
+    </script>
+  </body>
+</html>
