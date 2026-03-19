@@ -1579,6 +1579,34 @@ class PipelineOrchestrator:
                     article_manifest=alternate_manifest,
                     round_number=round_number,
                 )
+                alternate_provider_scores, alternate_disagreement_notes = _collect_article_jury_scores(
+                    orchestrator=self,
+                    article_manifest=alternate_manifest,
+                    brief=brief,
+                    quality_policy=run_context.quality_policy,
+                )
+                if alternate_provider_scores:
+                    alternate_provider_average = round(mean(score.score for score in alternate_provider_scores), 2)
+                    alternate_provider_min = round(min(score.score for score in alternate_provider_scores), 2)
+                    alternate_provider_variance = _score_variance(alternate_provider_scores)
+                    alternate_technical_accuracy_score = next(
+                        (
+                            score.score
+                            for score in alternate_provider_scores
+                            if score.judge == "technical_rigor_judge"
+                        ),
+                        run_context.quality_policy.final_technical_accuracy_score,
+                    )
+                    alternate_gate = alternate_gate.model_copy(
+                        update={
+                            "scores": alternate_provider_scores,
+                            "average_score": alternate_provider_average,
+                            "min_score": alternate_provider_min,
+                            "score_variance": alternate_provider_variance,
+                            "technical_accuracy_score": alternate_technical_accuracy_score,
+                            "notes": [*alternate_gate.notes, *alternate_disagreement_notes],
+                        }
+                    )
                 if alternate_gate.average_score >= gate.average_score:
                     working_content = alternate_content
                     last_qa_result = alternate_qa
