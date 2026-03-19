@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from app.config import EngineConfig
 from app.guardrails import build_run_context
 from app.openai_providers import (
@@ -23,6 +25,7 @@ from app.providers import MockContentGenerationProvider, ProviderRegistry
 from app.schemas import (
     ArticleManifest,
     BlueprintSection,
+    DraftArticle,
     FactCheckReport,
     InternalLink,
     JudgeScore,
@@ -486,3 +489,85 @@ def test_normalize_internal_links_does_not_duplicate_absolute_macroscope_links()
     assert "[Guide]([Guide](/blog/guide))" not in repaired
     assert repaired.count("(/blog/guide)") == 0
     assert any("internal-links section" in note.lower() for note in notes)
+
+
+def test_qa_optimize_respects_configured_max_rounds(tmp_path):
+    class LowScoreProvider(MockContentGenerationProvider):
+        def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
+            return JudgeScore(judge=judge_name, score=6.0, rationale="Still below threshold")
+
+    config = _make_config(
+        tmp_path,
+        provider_mode="openai",
+        openai_api_key="test-key",
+        optimizer_max_rounds=1,
+    )
+    provider = LowScoreProvider()
+    orchestrator = PipelineOrchestrator(config, providers=ProviderRegistry(content_generation=provider))
+    orchestrator.store = RunStore(config.data_dir, run_id="qa-max-rounds-run")
+    orchestrator.summary = RunSummary(run_id="qa-max-rounds-run", started_at=datetime.now(timezone.utc))
+
+    brief = _make_brief()
+    draft_content = provider.generate_draft("Draft article.", brief)
+
+    with pytest.raises(ValueError, match="Final quality gate failed"):
+        orchestrator._run_qa_optimize(
+            {
+                "brief": brief,
+                "draft": DraftArticle(
+                    title=brief.title_options[0],
+                    slug=brief.topic.slug,
+                    content_md=draft_content,
+                    word_count=len(draft_content.split()),
+                    brief_hash=brief.brief_hash(),
+                ),
+                "research_packet": _make_research_packet(),
+                "run_context": build_run_context(config, "qa-max-rounds-run"),
+            }
+        )
+
+    assert (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_1.json").exists()
+    assert not (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_2.json").exists()
+
+
+def test_qa_optimize_defaults_missing_technical_rigor_score(tmp_path):
+    class MissingTechnicalJudgeProvider(MockContentGenerationProvider):
+        def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
+            if judge_name == "technical_rigor_judge":
+                return JudgeScore(judge="unexpected_judge", score=9.4, rationale="Strong but mislabeled")
+            return JudgeScore(judge=judge_name, score=9.4, rationale="Strong")
+
+    config = _make_config(
+        tmp_path,
+        provider_mode="openai",
+        openai_api_key="test-key",
+        optimizer_max_rounds=1,
+    )
+    provider = MissingTechnicalJudgeProvider()
+    orchestrator = PipelineOrchestrator(config, providers=ProviderRegistry(content_generation=provider))
+    orchestrator.store = RunStore(config.data_dir, run_id="qa-missing-tech-run")
+    orchestrator.summary = RunSummary(run_id="qa-missing-tech-run", started_at=datetime.now(timezone.utc))
+
+    brief = _make_brief()
+    draft_content = provider.generate_draft("Draft article.", brief)
+    result = orchestrator._run_qa_optimize(
+        {
+            "brief": brief,
+            "draft": DraftArticle(
+                title=brief.title_options[0],
+                slug=brief.topic.slug,
+                content_md=draft_content,
+                word_count=len(draft_content.split()),
+                brief_hash=brief.brief_hash(),
+            ),
+            "research_packet": _make_research_packet(),
+            "run_context": build_run_context(config, "qa-missing-tech-run"),
+        }
+    )
+
+    gate_payload = (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_1.json").read_text(
+        encoding="utf-8"
+    )
+
+    assert result["final"].word_count > 0
+    assert '"technical_accuracy_score": 9.0' in gate_payload

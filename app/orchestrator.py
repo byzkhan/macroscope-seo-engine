@@ -1321,7 +1321,8 @@ class PipelineOrchestrator:
         second_draft_unlocked = False
 
         round_number = 1
-        while True:
+        max_rounds = run_context.quality_policy.max_optimization_rounds
+        while max_rounds <= 0 or round_number <= max_rounds:
             self._ensure_not_cancelled("qa_optimize")
             if last_qa_result is None or last_seo_score is None:
                 last_seo_score = score_seo_aeo(
@@ -1435,9 +1436,12 @@ class PipelineOrchestrator:
                 provider_min = round(min(score.score for score in provider_scores), 2)
                 provider_variance = _score_variance(provider_scores)
                 technical_accuracy_score = next(
-                    score.score
-                    for score in provider_scores
-                    if score.judge == "technical_rigor_judge"
+                    (
+                        score.score
+                        for score in provider_scores
+                        if score.judge == "technical_rigor_judge"
+                    ),
+                    run_context.quality_policy.final_technical_accuracy_score,
                 )
                 gate = gate.model_copy(
                     update={

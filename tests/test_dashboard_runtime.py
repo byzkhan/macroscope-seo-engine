@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import app.dashboard_runtime as dashboard_runtime
 from app.dashboard_runtime import DashboardRunManager, ScheduleSettings, _read_events, build_stage_views
 from app.schemas import ExecutionState, StageResult
 from app.storage import ExecutionJournal, RunStore
@@ -267,3 +268,48 @@ def test_dashboard_manager_rejects_path_traversal_for_artifacts(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError):
         manager.resolve_artifact_path("run-1", "../../secret.txt")
+
+
+def test_dashboard_manager_write_state_holds_lock_during_disk_write(tmp_path: Path, monkeypatch):
+    project_root = tmp_path
+    (project_root / "data").mkdir()
+    manager = DashboardRunManager(project_root)
+    observed: list[bool] = []
+
+    def fake_write_json(path: Path, data: dict) -> None:
+        observed.append(getattr(manager._lock, "_is_owned", lambda: False)())
+
+    monkeypatch.setattr(dashboard_runtime, "_write_json", fake_write_json)
+
+    manager._write_state()
+
+    assert observed == [True]
+
+
+def test_dashboard_manager_launch_worker_raises_runtime_error_if_subprocess_exits_immediately(
+    tmp_path: Path,
+    monkeypatch,
+):
+    class FakeProcess:
+        pid = 12345
+        returncode = 7
+
+        def wait(self, timeout=None) -> int:
+            return self.returncode
+
+    class FakePsutil:
+        class NoSuchProcess(Exception):
+            pass
+
+        def Process(self, pid: int):  # noqa: N802 - mirrors psutil API
+            raise self.NoSuchProcess(pid)
+
+    project_root = tmp_path
+    (project_root / "data").mkdir()
+    manager = DashboardRunManager(project_root)
+
+    monkeypatch.setattr(dashboard_runtime.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(dashboard_runtime, "psutil", FakePsutil())
+
+    with pytest.raises(RuntimeError, match="Worker process failed to start"):
+        manager._launch_worker("run", "run-123")

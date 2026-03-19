@@ -855,8 +855,15 @@ class DashboardRunManager:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        worker = psutil.Process(process.pid)
-        return ProcessHandle(pid=process.pid, create_time=worker.create_time())
+        try:
+            worker = psutil.Process(process.pid)
+            return ProcessHandle(pid=process.pid, create_time=worker.create_time())
+        except psutil.NoSuchProcess as exc:
+            process.wait(timeout=0.1)
+            raise RuntimeError(
+                f"Worker process failed to start (pid={process.pid}, exit_code={process.returncode}). "
+                "Check that app.main is importable."
+            ) from exc
 
     def _escalate_stop_after_grace(self, run_id: str, worker: ProcessHandle) -> None:
         """Escalate a stop request to process termination if needed."""
@@ -922,4 +929,4 @@ class DashboardRunManager:
                 "last_trigger": self._last_trigger,
                 "updated_at": _utc_now_iso(),
             }
-        _write_json(self.state_path, payload)
+            _write_json(self.state_path, payload)
