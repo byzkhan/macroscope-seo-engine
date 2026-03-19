@@ -704,7 +704,6 @@ class DashboardRunManager:
         }
 
     def get_artifact_content(self, run_id: str, artifact_name: str) -> dict[str, Any]:
-        run_dir = self.data_dir / "runs" / run_id
         path = self.resolve_artifact_path(run_id, artifact_name)
 
         suffix = path.suffix.lower()

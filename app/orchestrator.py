@@ -267,7 +267,6 @@ class PipelineOrchestrator:
             stage_name = stage_enum.value
             stage_fn = self._stage_fns[stage_name]
             t0 = time.monotonic()
-            self._ensure_not_cancelled(stage_name)
             self._mark_stage_started(stage_name, stage_order)
             self._emit_event(
                 "stage_started",
@@ -275,6 +274,7 @@ class PipelineOrchestrator:
                 run_id=self.summary.run_id,
             )
             try:
+                self._ensure_not_cancelled(stage_name)
                 if not self.config.json_output:
                     console.print(f"\n[bold cyan]▶ {stage_name}[/bold cyan]")
 
@@ -1583,6 +1583,7 @@ class PipelineOrchestrator:
                     working_content = alternate_content
                     last_qa_result = alternate_qa
                     last_seo_score = alternate_seo
+                    last_gate = alternate_gate
                     last_manifest = alternate_manifest
                     self.store.save_markdown("drafts/runner_up_unlocked.md", alternate_content)
                     self._emit_agent_trace(
