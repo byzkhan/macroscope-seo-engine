@@ -1607,6 +1607,15 @@ class PipelineOrchestrator:
                             "notes": [*alternate_gate.notes, *alternate_disagreement_notes],
                         }
                     )
+                    alternate_passed, alternate_gate_notes = quality_gate_passed(
+                        average_score=alternate_gate.average_score,
+                        min_score=alternate_gate.min_score,
+                        technical_accuracy_score=alternate_gate.technical_accuracy_score,
+                        policy=run_context.quality_policy,
+                    )
+                    alternate_gate = alternate_gate.model_copy(
+                        update={"passed": alternate_passed, "notes": [*alternate_gate.notes, *alternate_gate_notes]}
+                    )
                 if alternate_gate.average_score >= gate.average_score:
                     working_content = alternate_content
                     last_qa_result = alternate_qa
