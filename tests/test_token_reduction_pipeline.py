@@ -491,7 +491,7 @@ def test_normalize_internal_links_does_not_duplicate_absolute_macroscope_links()
     assert any("internal-links section" in note.lower() for note in notes)
 
 
-def test_qa_optimize_respects_configured_max_rounds(tmp_path):
+def test_qa_optimize_uses_best_available_draft_when_round_cap_is_hit(tmp_path):
     class LowScoreProvider(MockContentGenerationProvider):
         def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
             return JudgeScore(judge=judge_name, score=6.0, rationale="Still below threshold")
@@ -510,24 +510,118 @@ def test_qa_optimize_respects_configured_max_rounds(tmp_path):
     brief = _make_brief()
     draft_content = provider.generate_draft("Draft article.", brief)
 
-    with pytest.raises(ValueError, match="Final quality gate failed"):
-        orchestrator._run_qa_optimize(
-            {
-                "brief": brief,
-                "draft": DraftArticle(
-                    title=brief.title_options[0],
-                    slug=brief.topic.slug,
-                    content_md=draft_content,
-                    word_count=len(draft_content.split()),
-                    brief_hash=brief.brief_hash(),
-                ),
-                "research_packet": _make_research_packet(),
-                "run_context": build_run_context(config, "qa-max-rounds-run"),
-            }
-        )
+    result = orchestrator._run_qa_optimize(
+        {
+            "brief": brief,
+            "draft": DraftArticle(
+                title=brief.title_options[0],
+                slug=brief.topic.slug,
+                content_md=draft_content,
+                word_count=len(draft_content.split()),
+                brief_hash=brief.brief_hash(),
+            ),
+            "research_packet": _make_research_packet(),
+            "run_context": build_run_context(config, "qa-max-rounds-run"),
+        }
+    )
 
     assert (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_1.json").exists()
     assert not (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_2.json").exists()
+    assert result["final"].word_count > 0
+    assert result["final_quality_gate"].passed is False
+    assert any("optimization cap" in note.lower() for note in result["final_quality_gate"].notes)
+
+
+def test_qa_optimize_stops_after_repeated_non_improving_rounds(tmp_path):
+    class StalledProvider(MockContentGenerationProvider):
+        def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
+            return JudgeScore(judge=judge_name, score=6.0, rationale="No material improvement")
+
+    config = _make_config(
+        tmp_path,
+        provider_mode="openai",
+        openai_api_key="test-key",
+        optimizer_max_rounds=20,
+    )
+    provider = StalledProvider()
+    orchestrator = PipelineOrchestrator(config, providers=ProviderRegistry(content_generation=provider))
+    orchestrator.store = RunStore(config.data_dir, run_id="qa-stall-run")
+    orchestrator.summary = RunSummary(run_id="qa-stall-run", started_at=datetime.now(timezone.utc))
+
+    brief = _make_brief()
+    draft_content = provider.generate_draft("Draft article.", brief)
+    result = orchestrator._run_qa_optimize(
+        {
+            "brief": brief,
+            "draft": DraftArticle(
+                title=brief.title_options[0],
+                slug=brief.topic.slug,
+                content_md=draft_content,
+                word_count=len(draft_content.split()),
+                brief_hash=brief.brief_hash(),
+            ),
+            "research_packet": _make_research_packet(),
+            "run_context": build_run_context(config, "qa-stall-run"),
+        }
+    )
+
+    assert (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_5.json").exists()
+    assert not (orchestrator.store.run_dir / "optimization" / "final_quality_gate_round_6.json").exists()
+    assert result["final"].word_count > 0
+    assert any("stalled" in note.lower() for note in result["final_quality_gate"].notes)
+
+
+def test_qa_optimize_stall_fallback_survives_post_rewrite_snapshot_reset(tmp_path):
+    class RewritingStalledProvider(MockContentGenerationProvider):
+        def __init__(self) -> None:
+            self.patch_counter = 0
+
+        def optimize_sections(
+            self,
+            prompt: str,
+            content: str,
+            manifest: ArticleManifest,
+        ) -> OptimizationPatch:
+            self.patch_counter += 1
+            return OptimizationPatch(
+                opening_direct_answer=f"{manifest.opening_direct_answer} pass {self.patch_counter}",
+                notes=[f"rewrite {self.patch_counter}"],
+            )
+
+        def judge_article(self, prompt: str, content: str, judge_name: str) -> JudgeScore:
+            return JudgeScore(judge=judge_name, score=6.0, rationale="Still not good enough")
+
+    config = _make_config(
+        tmp_path,
+        provider_mode="openai",
+        openai_api_key="test-key",
+        optimizer_max_rounds=20,
+    )
+    provider = RewritingStalledProvider()
+    orchestrator = PipelineOrchestrator(config, providers=ProviderRegistry(content_generation=provider))
+    orchestrator.store = RunStore(config.data_dir, run_id="qa-stall-reset-run")
+    orchestrator.summary = RunSummary(run_id="qa-stall-reset-run", started_at=datetime.now(timezone.utc))
+
+    brief = _make_brief()
+    draft_content = provider.generate_draft("Draft article.", brief)
+    result = orchestrator._run_qa_optimize(
+        {
+            "brief": brief,
+            "draft": DraftArticle(
+                title=brief.title_options[0],
+                slug=brief.topic.slug,
+                content_md=draft_content,
+                word_count=len(draft_content.split()),
+                brief_hash=brief.brief_hash(),
+            ),
+            "research_packet": _make_research_packet(),
+            "run_context": build_run_context(config, "qa-stall-reset-run"),
+        }
+    )
+
+    assert result["final"].word_count > 0
+    assert result["final_quality_gate"].average_score >= 0
+    assert any("best available draft" in note.lower() for note in result["final_quality_gate"].notes)
 
 
 def test_qa_optimize_defaults_missing_technical_rigor_score(tmp_path):

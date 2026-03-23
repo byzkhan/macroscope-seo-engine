@@ -4,6 +4,8 @@ Macroscope SEO Engine is a stateless, multi-stage content pipeline that research
 
 It is built for engineering audiences, not generic marketing content. The system uses multiple specialized subagents, durable run artifacts, explicit quality gates, and a dashboard that can start, stop, inspect, and now resume interrupted runs from the same stage boundary.
 
+Repo-level model and agent operating instructions live in `AGENTS.md`.
+
 ## What The System Does
 
 One pipeline run:
@@ -230,8 +232,8 @@ The dashboard supports:
 - `Run pipeline`
 - `Stop run`
 - `Resume run` for checkpointed interrupted runs
-- recent runs with status
-- expandable stage cards
+- a compact recent-runs strip
+- a thin expandable stage stack
 - final markdown export from the last stage
 
 Status model:

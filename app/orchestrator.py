@@ -8,6 +8,7 @@ without changing business logic.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import math
 import re
@@ -1319,6 +1320,13 @@ class PipelineOrchestrator:
         last_seo_score = None
         last_manifest: ArticleManifest | None = None
         second_draft_unlocked = False
+        best_candidate: dict[str, Any] | None = None
+        rounds_without_improvement = 0
+        repeated_target_rounds = 0
+        last_target_signature: tuple[str, ...] | None = None
+        fallback_reason: str | None = None
+        stall_round_limit = 4
+        repeated_target_limit = 4
 
         round_number = 1
         max_rounds = run_context.quality_policy.max_optimization_rounds
@@ -1476,6 +1484,17 @@ class PipelineOrchestrator:
             last_qa_result = qa_result
             last_seo_score = seo_score
             last_manifest = article_manifest
+            improved_this_round = False
+            previous_best_gate = best_candidate["gate"] if best_candidate else None
+            if _is_better_optimization_candidate(gate, previous_best_gate):
+                best_candidate = _capture_optimization_candidate(
+                    content=working_content,
+                    gate=gate,
+                    qa_result=qa_result,
+                    seo_score=seo_score,
+                    article_manifest=article_manifest,
+                )
+                improved_this_round = _has_material_gate_improvement(gate, previous_best_gate)
             if gate.passed:
                 break
             rewrite_targets = _focused_rewrite_targets(
@@ -1483,6 +1502,16 @@ class PipelineOrchestrator:
                 brief=brief,
                 gate=gate,
             )
+            target_signature = tuple(target.strip().lower() for target in rewrite_targets if target.strip())
+            if target_signature:
+                if target_signature == last_target_signature:
+                    repeated_target_rounds += 1
+                else:
+                    repeated_target_rounds = 1
+                    last_target_signature = target_signature
+            else:
+                repeated_target_rounds = 0
+                last_target_signature = None
             if rewrite_targets:
                 rewrite_prompt = focused_section_rewrite_prompt(
                     article_manifest=article_manifest,
@@ -1622,6 +1651,19 @@ class PipelineOrchestrator:
                     last_seo_score = alternate_seo
                     last_gate = alternate_gate
                     last_manifest = alternate_manifest
+                    previous_best_gate = best_candidate["gate"] if best_candidate else None
+                    if _is_better_optimization_candidate(alternate_gate, previous_best_gate):
+                        improved_this_round = improved_this_round or _has_material_gate_improvement(
+                            alternate_gate,
+                            previous_best_gate,
+                        )
+                        best_candidate = _capture_optimization_candidate(
+                            content=alternate_content,
+                            gate=alternate_gate,
+                            qa_result=alternate_qa,
+                            seo_score=alternate_seo,
+                            article_manifest=alternate_manifest,
+                        )
                     self.store.save_markdown("drafts/runner_up_unlocked.md", alternate_content)
                     self._emit_agent_trace(
                         "qa_optimize",
@@ -1629,11 +1671,81 @@ class PipelineOrchestrator:
                         preview=f"{alternate_gate.average_score:.2f}/10",
                         status="success",
                     )
+            if improved_this_round:
+                rounds_without_improvement = 0
+                repeated_target_rounds = 0
+            else:
+                rounds_without_improvement += 1
+            if rounds_without_improvement >= stall_round_limit:
+                best_round = best_candidate["round_number"] if best_candidate else round_number
+                fallback_reason = (
+                    f"Optimization stalled after {rounds_without_improvement} non-improving rounds; "
+                    f"selecting the best available draft from round {best_round}."
+                )
+                self._emit_agent_trace(
+                    "qa_optimize",
+                    "Optimizer stalled without a material score improvement.",
+                    preview=fallback_reason,
+                    status="warning",
+                )
+                break
+            if repeated_target_rounds >= repeated_target_limit:
+                best_round = best_candidate["round_number"] if best_candidate else round_number
+                fallback_reason = (
+                    f"Focused rewrites repeated the same target sections for {repeated_target_rounds} rounds; "
+                    f"selecting the best available draft from round {best_round}."
+                )
+                self._emit_agent_trace(
+                    "qa_optimize",
+                    "Optimizer detected a repeated weak-section loop.",
+                    preview=fallback_reason,
+                    status="warning",
+                )
+                break
             round_number += 1
+
+        should_restore_best = (
+            best_candidate is not None
+            and (
+                last_gate is None
+                or last_qa_result is None
+                or last_seo_score is None
+                or last_manifest is None
+                or not last_gate.passed
+            )
+        )
+        if should_restore_best:
+            if fallback_reason is None and max_rounds > 0:
+                fallback_reason = (
+                    f"Reached the optimization cap of {max_rounds} rounds without clearing the 9.0 publication gate; "
+                    f"selecting the best available draft from round {best_candidate['round_number']}."
+                )
+            working_content = best_candidate["content"]
+            last_gate = best_candidate["gate"].model_copy(
+                update={
+                    "notes": [
+                        *best_candidate["gate"].notes,
+                        fallback_reason
+                        or (
+                            "Optimization stopped before clearing the publication gate; "
+                            "selected the best available draft."
+                        ),
+                    ]
+                }
+            )
+            last_qa_result = best_candidate["qa_result"]
+            last_seo_score = best_candidate["seo_score"]
+            last_manifest = best_candidate["article_manifest"]
+            self._emit_agent_trace(
+                "qa_optimize",
+                "Optimization stopped before the 9.0 gate and selected the best available draft.",
+                preview=f"Round {best_candidate['round_number']} • {last_gate.average_score:.2f}/10",
+                status="warning",
+            )
 
         if last_gate is None or last_qa_result is None or last_seo_score is None or last_manifest is None:
             raise ValueError("Optimizer jury did not produce a final gate result")
-        if not last_gate.passed:
+        if not last_gate.passed and best_candidate is None:
             raise ValueError(
                 f"Final quality gate failed at {last_gate.average_score:.2f}/10 after optimization"
             )
@@ -2856,6 +2968,66 @@ def _ground_article_judge_scores(
         else:
             grounded.append(score)
     return grounded
+
+
+def _optimization_candidate_rank(gate: FinalQualityGate) -> tuple[float, float, float, float, float]:
+    """Rank an optimization result by pass/fail, average, technical, minimum, and stability."""
+    return (
+        1.0 if gate.passed else 0.0,
+        gate.average_score,
+        gate.technical_accuracy_score,
+        gate.min_score,
+        -gate.score_variance,
+    )
+
+
+def _is_better_optimization_candidate(
+    candidate_gate: FinalQualityGate,
+    best_gate: FinalQualityGate | None,
+) -> bool:
+    """Return True when the new gate is a better fallback candidate."""
+    if best_gate is None:
+        return True
+    return _optimization_candidate_rank(candidate_gate) > _optimization_candidate_rank(best_gate)
+
+
+def _has_material_gate_improvement(
+    candidate_gate: FinalQualityGate,
+    best_gate: FinalQualityGate | None,
+    *,
+    min_delta: float = 0.15,
+) -> bool:
+    """Detect whether a gate improved enough to justify another optimization loop."""
+    if best_gate is None:
+        return True
+    if candidate_gate.passed and not best_gate.passed:
+        return True
+    if candidate_gate.average_score >= best_gate.average_score + min_delta:
+        return True
+    if candidate_gate.technical_accuracy_score >= best_gate.technical_accuracy_score + min_delta:
+        return True
+    if candidate_gate.min_score >= best_gate.min_score + min_delta:
+        return True
+    return False
+
+
+def _capture_optimization_candidate(
+    *,
+    content: str,
+    gate: FinalQualityGate,
+    qa_result: QAResult,
+    seo_score,
+    article_manifest: ArticleManifest,
+) -> dict[str, Any]:
+    """Persist the best-so-far optimization state for fallback selection."""
+    return {
+        "content": content,
+        "gate": gate.model_copy(deep=True),
+        "qa_result": deepcopy(qa_result),
+        "seo_score": deepcopy(seo_score),
+        "article_manifest": article_manifest.model_copy(deep=True),
+        "round_number": gate.round_number,
+    }
 
 
 def _checkpoint_ctx_fragment(stage_name: str, ctx: dict[str, Any]) -> dict[str, Any]:
