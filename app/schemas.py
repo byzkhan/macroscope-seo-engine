@@ -74,7 +74,7 @@ class QualityPolicy(BaseModel):
     final_judge_variance_threshold: float = Field(default=0.45, ge=0.0, le=10.0)
     max_research_retries: int = Field(default=1, ge=0, le=5)
     max_brief_retries: int = Field(default=1, ge=0, le=5)
-    max_optimization_rounds: int = Field(default=0, ge=0)
+    max_optimization_rounds: int = Field(default=10, ge=0)
 
 
 class SourcePolicy(BaseModel):

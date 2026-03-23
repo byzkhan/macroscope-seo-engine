@@ -62,7 +62,7 @@ class EngineConfig:
     draft_judge_variance_threshold: float = 0.6
     final_judge_spread_threshold: float = 1.2
     final_judge_variance_threshold: float = 0.45
-    optimizer_max_rounds: int = 0
+    optimizer_max_rounds: int = 10
     max_topic_candidates: int = 12
     model_judged_topics: int = 6
     full_panel_topics: int = 2
@@ -205,7 +205,7 @@ def load_config(
         draft_judge_variance_threshold=float(_env_value("DRAFT_JUDGE_VARIANCE_THRESHOLD", dotenv_values, "0.6") or "0.6"),
         final_judge_spread_threshold=float(_env_value("FINAL_JUDGE_SPREAD_THRESHOLD", dotenv_values, "1.2") or "1.2"),
         final_judge_variance_threshold=float(_env_value("FINAL_JUDGE_VARIANCE_THRESHOLD", dotenv_values, "0.45") or "0.45"),
-        optimizer_max_rounds=int(_env_value("OPTIMIZER_MAX_ROUNDS", dotenv_values, "0") or "0"),
+        optimizer_max_rounds=int(_env_value("OPTIMIZER_MAX_ROUNDS", dotenv_values, "10") or "10"),
         max_topic_candidates=int(_env_value("MAX_TOPIC_CANDIDATES", dotenv_values, "12") or "12"),
         model_judged_topics=int(_env_value("MODEL_JUDGED_TOPICS", dotenv_values, "6") or "6"),
         full_panel_topics=int(_env_value("FULL_PANEL_TOPICS", dotenv_values, "2") or "2"),

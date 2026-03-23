@@ -4,90 +4,122 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macroscope Pipeline Dashboard</title>
-    <link rel="stylesheet" href="/static/dashboard.css" />
+    <link rel="stylesheet" href="/static/dashboard.css?v=20260323-codex-shell" />
   </head>
   <body>
-    <div class="page">
-      <header class="page-header">
-        <div class="header-copy">
+    <div class="app-shell">
+      <aside id="sidebar" class="sidebar" aria-label="Pipeline runs">
+        <div class="sidebar-brand">
           <p class="eyebrow">Macroscope SEO Engine</p>
-          <h1>Pipeline stages</h1>
-          <p class="header-note">
-            Run the pipeline, watch each stage move from loading to done, and open any stage to inspect what happened.
-          </p>
+          <h1>Runs</h1>
+          <p id="run-selection-note" class="sidebar-note">Select a run to inspect its pipeline.</p>
         </div>
 
-        <div class="header-controls">
-          <div class="status-card">
-            <span class="status-label">Status</span>
-            <strong id="system-status">Loading…</strong>
+        <div class="sidebar-section">
+          <div class="sidebar-section-head">
+            <span class="sidebar-label">History</span>
           </div>
-          <div class="status-card">
-            <span class="status-label">Active run</span>
-            <strong id="active-run">None</strong>
-          </div>
-          <button id="run-now" class="primary-button">Run pipeline</button>
-          <button id="stop-run" class="danger-button">Stop run</button>
-          <button id="resume-run" class="secondary-button">Resume run</button>
-          <button id="refresh" class="secondary-button">Refresh</button>
+          <div id="recent-runs" class="thread-list"></div>
         </div>
-      </header>
+      </aside>
 
-      <p id="flash-message" class="flash-message"></p>
+      <button
+        id="sidebar-backdrop"
+        class="sidebar-backdrop"
+        type="button"
+        hidden
+        aria-label="Close runs sidebar"
+      ></button>
 
-      <section class="panel runs-panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Runs</p>
-            <h2>Recent runs</h2>
+      <main class="workspace">
+        <header class="workspace-bar">
+          <div class="workspace-bar-main">
+            <button
+              id="sidebar-toggle"
+              class="icon-button sidebar-toggle"
+              type="button"
+              aria-label="Open runs sidebar"
+            >
+              <span></span>
+              <span></span>
+              <span></span>
+            </button>
+
+            <div class="workspace-brand">
+              <p class="eyebrow">Macroscope SEO Engine</p>
+              <h2>Pipeline workspace</h2>
+            </div>
           </div>
-          <p id="run-selection-note" class="panel-note">Select a run to inspect its stages.</p>
+
+          <div class="workspace-bar-side">
+            <div class="status-group">
+              <div class="status-chip">
+                <span>Status</span>
+                <strong id="system-status">Loading...</strong>
+              </div>
+              <div class="status-chip status-chip--wide">
+                <span>Active run</span>
+                <strong id="active-run">None</strong>
+              </div>
+            </div>
+
+            <div class="toolbar-actions">
+              <button id="run-now" class="primary-button">Run pipeline</button>
+              <button id="stop-run" class="danger-button">Stop run</button>
+              <button id="resume-run" class="secondary-button">Resume run</button>
+              <button id="refresh" class="secondary-button">Refresh</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="workspace-scroll">
+          <p id="flash-message" class="flash-message"></p>
+
+          <section class="run-header">
+            <div class="run-header-copy">
+              <p id="pipeline-run-id" class="run-id-pill">Waiting for a run</p>
+              <h3 id="pipeline-title">Select a run from the sidebar</h3>
+              <p id="pipeline-meta" class="run-meta-line">
+                Start a run to see the pipeline progress here.
+              </p>
+            </div>
+            <p id="run-banner" class="run-banner" hidden></p>
+          </section>
+
+          <section id="stage-list" class="stage-list"></section>
         </div>
-        <div id="recent-runs" class="run-list"></div>
-      </section>
-
-      <section class="panel pipeline-panel">
-        <div class="panel-head panel-head--stacked">
-          <div>
-            <p class="eyebrow">Pipeline</p>
-            <h2 id="pipeline-title">Waiting for a run</h2>
-          </div>
-
-          <div class="run-summary">
-            <div class="summary-item">
-              <span>Topic</span>
-              <strong id="run-topic">—</strong>
-            </div>
-            <div class="summary-item">
-              <span>Grade</span>
-              <strong id="run-grade">—</strong>
-            </div>
-            <div class="summary-item">
-              <span>Words</span>
-              <strong id="run-words">—</strong>
-            </div>
-            <div class="summary-item">
-              <span>Duration</span>
-              <strong id="run-duration">—</strong>
-            </div>
-          </div>
-        </div>
-
-        <p id="run-banner" class="run-banner" hidden></p>
-
-        <div id="stage-list" class="stage-list"></div>
-      </section>
+      </main>
     </div>
 
     <script>
+      const NO_EXPANDED_STAGE = "__none__";
+      const STORAGE_KEYS = {
+        selectedRunId: "macroscope.dashboard.selectedRunId",
+        expandedStages: "macroscope.dashboard.expandedStages",
+      };
+
+      function readStoredJson(key, fallback) {
+        try {
+          const raw = window.sessionStorage.getItem(key);
+          return raw ? JSON.parse(raw) : fallback;
+        } catch (_error) {
+          return fallback;
+        }
+      }
+
       const state = {
-        selectedRunId: null,
+        selectedRunId: window.sessionStorage.getItem(STORAGE_KEYS.selectedRunId),
         selectedRunDetail: null,
         expandedStage: null,
+        expandedStagesByRun: readStoredJson(STORAGE_KEYS.expandedStages, {}),
         status: null,
+        sidebarOpen: false,
       };
 
       const els = {
+        sidebar: document.getElementById("sidebar"),
+        sidebarBackdrop: document.getElementById("sidebar-backdrop"),
+        sidebarToggle: document.getElementById("sidebar-toggle"),
         systemStatus: document.getElementById("system-status"),
         activeRun: document.getElementById("active-run"),
         runNow: document.getElementById("run-now"),
@@ -97,11 +129,9 @@
         flashMessage: document.getElementById("flash-message"),
         recentRuns: document.getElementById("recent-runs"),
         runSelectionNote: document.getElementById("run-selection-note"),
+        pipelineRunId: document.getElementById("pipeline-run-id"),
         pipelineTitle: document.getElementById("pipeline-title"),
-        runTopic: document.getElementById("run-topic"),
-        runGrade: document.getElementById("run-grade"),
-        runWords: document.getElementById("run-words"),
-        runDuration: document.getElementById("run-duration"),
+        pipelineMeta: document.getElementById("pipeline-meta"),
         runBanner: document.getElementById("run-banner"),
         stageList: document.getElementById("stage-list"),
       };
@@ -120,7 +150,7 @@
         if (text.length <= maxLength) {
           return text;
         }
-        return `${text.slice(0, maxLength - 1).trimEnd()}…`;
+        return `${text.slice(0, maxLength - 1).trimEnd()}...`;
       }
 
       function formatDuration(value) {
@@ -170,6 +200,17 @@
         return response.json();
       }
 
+      function runStatusText(status) {
+        if (status === "running") return "Running";
+        if (status === "resuming") return "Resuming";
+        if (status === "stopping") return "Stopping";
+        if (status === "completed") return "Completed";
+        if (status === "canceled") return "Stopped";
+        if (status === "interrupted") return "Interrupted";
+        if (status === "failed") return "Failed";
+        return "Idle";
+      }
+
       function chooseRunId(status) {
         const available = new Set((status.recent_runs || []).map((run) => run.run_id));
         if (state.selectedRunId && (available.has(state.selectedRunId) || state.selectedRunId === status.active_run_id)) {
@@ -195,6 +236,59 @@
         return String(path || "").split("/").pop() || "";
       }
 
+      function persistSelectedRunId() {
+        if (state.selectedRunId) {
+          window.sessionStorage.setItem(STORAGE_KEYS.selectedRunId, state.selectedRunId);
+        } else {
+          window.sessionStorage.removeItem(STORAGE_KEYS.selectedRunId);
+        }
+      }
+
+      function persistExpandedStages() {
+        window.sessionStorage.setItem(
+          STORAGE_KEYS.expandedStages,
+          JSON.stringify(state.expandedStagesByRun),
+        );
+      }
+
+      function getStoredExpandedStage(runId) {
+        if (!runId) {
+          return null;
+        }
+        return Object.prototype.hasOwnProperty.call(state.expandedStagesByRun, runId)
+          ? state.expandedStagesByRun[runId]
+          : null;
+      }
+
+      function setStoredExpandedStage(runId, stageName) {
+        if (!runId) {
+          return;
+        }
+        state.expandedStagesByRun[runId] = stageName || NO_EXPANDED_STAGE;
+        persistExpandedStages();
+      }
+
+      function isDrawerMode() {
+        return window.matchMedia("(max-width: 1080px)").matches;
+      }
+
+      function syncSidebarState() {
+        const open = state.sidebarOpen && isDrawerMode();
+        document.body.classList.toggle("drawer-open", open);
+        els.sidebarBackdrop.hidden = !open;
+      }
+
+      function setSidebarOpen(open) {
+        state.sidebarOpen = open;
+        syncSidebarState();
+      }
+
+      function closeSidebarIfDrawer() {
+        if (isDrawerMode()) {
+          setSidebarOpen(false);
+        }
+      }
+
       function statusIcon(status) {
         if (status === "running") {
           return '<span class="stage-icon stage-icon--spinner" aria-hidden="true"></span>';
@@ -206,6 +300,9 @@
           return '<span class="stage-icon stage-icon--canceled" aria-hidden="true">■</span>';
         }
         if (status === "failed") {
+          return '<span class="stage-icon stage-icon--failed" aria-hidden="true">!</span>';
+        }
+        if (status === "interrupted") {
           return '<span class="stage-icon stage-icon--failed" aria-hidden="true">!</span>';
         }
         return '<span class="stage-icon stage-icon--pending" aria-hidden="true"></span>';
@@ -222,34 +319,52 @@
         return "Waiting";
       }
 
+      function buildRunMeta(run) {
+        const parts = [];
+        if (run.status) {
+          parts.push(runStatusText(run.status));
+        }
+        if (run.grade) {
+          parts.push(run.grade);
+        }
+        if (run.word_count) {
+          parts.push(`${run.word_count} words`);
+        }
+        if (run.duration_seconds) {
+          parts.push(formatDuration(run.duration_seconds));
+        }
+        return parts.join(" · ");
+      }
+
+      function buildRunTitle(run) {
+        return truncate(run.topic || "Untitled run", 70);
+      }
+
       function renderRecentRuns() {
         const runs = state.status?.recent_runs || [];
         els.recentRuns.innerHTML = "";
 
         if (!runs.length) {
-          els.recentRuns.innerHTML = '<p class="empty-state">No runs yet.</p>';
+          els.recentRuns.innerHTML = '<p class="empty-state">No pipeline runs yet.</p>';
           return;
         }
 
         runs.forEach((run) => {
           const button = document.createElement("button");
           button.type = "button";
-          button.className = `run-card${run.run_id === state.selectedRunId ? " is-selected" : ""}`;
+          button.className = `thread-item${run.run_id === state.selectedRunId ? " is-selected" : ""}`;
+          button.setAttribute("aria-current", run.run_id === state.selectedRunId ? "true" : "false");
           button.innerHTML = `
-            <div class="run-card-top">
-              <span class="run-id">${escapeHtml(run.run_id)}</span>
-              <span class="run-grade">${escapeHtml(run.grade || (run.status === "failed" ? "Failed" : run.status === "canceled" ? "Stopped" : run.status === "interrupted" ? "Interrupted" : run.status === "resuming" ? "Resuming" : run.status === "stopping" ? "Stopping" : "—"))}</span>
-            </div>
-            <strong class="run-topic">${escapeHtml(truncate(run.topic || "Untitled run", 90))}</strong>
-            <div class="run-meta">
-              <span>${run.word_count ? `${escapeHtml(run.word_count)} words` : "No word count"}</span>
-              <span>${escapeHtml(run.status === "running" ? "Running" : run.status === "resuming" ? "Resuming" : run.status === "stopping" ? "Stopping" : run.status === "completed" ? "Completed" : run.status === "canceled" ? "Stopped" : run.status === "interrupted" ? "Interrupted" : "Failed")}</span>
-            </div>
+            <span class="thread-title">${escapeHtml(buildRunTitle(run))}</span>
+            <span class="thread-subline">${escapeHtml(run.run_id)}</span>
+            <span class="thread-meta">${escapeHtml(buildRunMeta(run) || "No summary yet")}</span>
           `;
           button.addEventListener("click", async () => {
             state.selectedRunId = run.run_id;
+            persistSelectedRunId();
             state.selectedRunDetail = null;
             await loadDashboard();
+            closeSidebarIfDrawer();
           });
           els.recentRuns.appendChild(button);
         });
@@ -260,33 +375,56 @@
         const running = Boolean(status.running);
         const stopRequested = Boolean(status.stop_requested);
         const detailStatus = state.selectedRunDetail?.status || state.selectedRunDetail?.summary?.status;
+
         els.systemStatus.textContent = stopRequested
           ? "Stopping"
           : running
             ? (detailStatus === "resuming" ? "Resuming" : "Running")
             : "Idle";
         els.activeRun.textContent = status.active_run_id || "None";
+
         els.runNow.disabled = running;
         els.stopRun.disabled = !running || stopRequested;
-        els.stopRun.textContent = stopRequested ? "Stopping…" : "Stop run";
+        els.stopRun.textContent = stopRequested ? "Stopping..." : "Stop run";
+
         const resumable = Boolean(state.selectedRunDetail?.resumable);
         els.resumeRun.disabled = running || !resumable;
+
         els.runSelectionNote.textContent = state.selectedRunId
-          ? `Showing ${state.selectedRunId}`
-          : "Select a run to inspect its stages.";
+          ? `Selected ${state.selectedRunId}`
+          : "Select a run to inspect its pipeline.";
       }
 
       function renderPipelineSummary() {
         const detail = state.selectedRunDetail;
         const summary = detail?.summary || {};
         const selected = detail?.selected_topic?.candidate || {};
-        els.pipelineTitle.textContent = detail ? `Run ${detail.run_id}` : "Waiting for a run";
-        els.runTopic.textContent = selected.title || summary.topic_selected || (summary.success === false ? "No topic selected" : "—");
-        els.runGrade.textContent = summary.final_grade || (summary.success === false ? "Failed" : "—");
-        els.runWords.textContent = summary.word_count ? `${summary.word_count}` : "—";
-        els.runDuration.textContent = summary.total_duration_seconds
-          ? formatDuration(summary.total_duration_seconds)
-          : "—";
+        const metaParts = [];
+        const runTitle = selected.title || summary.topic_selected || "Untitled run";
+
+        els.pipelineRunId.textContent = detail ? detail.run_id : "Waiting for a run";
+        els.pipelineTitle.textContent = detail ? runTitle : "Select a run from the sidebar";
+
+        if (detail?.status) {
+          metaParts.push(runStatusText(detail.status));
+        }
+        if (summary.final_grade) {
+          metaParts.push(`Grade ${summary.final_grade}`);
+        }
+        if (summary.word_count) {
+          metaParts.push(`${summary.word_count} words`);
+        }
+        if (summary.total_duration_seconds) {
+          metaParts.push(formatDuration(summary.total_duration_seconds));
+        }
+        if (detail?.resumed_from_stage) {
+          metaParts.push(`Resumed from ${detail.resumed_from_stage}`);
+        }
+
+        els.pipelineMeta.textContent = detail
+          ? metaParts.join(" · ") || "Waiting for stage updates."
+          : "Start a run to see the pipeline progress here.";
+
         if (summary.success === false && Array.isArray(summary.errors) && summary.errors.length) {
           els.runBanner.hidden = false;
           els.runBanner.textContent = summary.errors[0];
@@ -302,9 +440,76 @@
         const isLastStage = index === totalStages - 1;
         const articleName = basename(detail?.article_path);
         const canExport = isLastStage && detail?.article_path && articleName;
-        const articlePreview = detail?.article_preview ? truncate(detail.article_preview, 1800) : "";
         const artifactName = stage.artifact_path ? basename(stage.artifact_path) : "";
         const traces = stage.traces || [];
+        const latestText = stage.latest_preview || stage.latest_prompt || "";
+        const detailBlocks = [];
+
+        if (latestText) {
+          detailBlocks.push(`
+            <section class="detail-section">
+              <h4>Latest</h4>
+              <p class="detail-text">${escapeHtml(truncate(latestText, 240))}</p>
+            </section>
+          `);
+        }
+
+        if (traces.length) {
+          detailBlocks.push(`
+            <section class="detail-section">
+              <h4>What happened</h4>
+              <ul class="trace-list">
+                ${traces
+                  .map(
+                    (trace) => `
+                      <li class="trace-item">
+                        <strong>${escapeHtml(trace.message || "Stage update")}</strong>
+                        ${
+                          trace.preview
+                            ? `<span>${escapeHtml(truncate(trace.preview, 168))}</span>`
+                            : ""
+                        }
+                      </li>
+                    `,
+                  )
+                  .join("")}
+              </ul>
+            </section>
+          `);
+        }
+
+        if (stage.error) {
+          detailBlocks.push(`
+            <section class="detail-section detail-section--error">
+              <h4>Error</h4>
+              <p class="detail-text">${escapeHtml(stage.error)}</p>
+            </section>
+          `);
+        } else if (canExport) {
+          detailBlocks.push(`
+            <section class="detail-section detail-section--export">
+              <div class="export-row">
+                <div>
+                  <h4>Export Markdown</h4>
+                  <p class="detail-text">${escapeHtml(articleName)}</p>
+                </div>
+                <a
+                  class="export-button"
+                  href="/api/runs/${encodeURIComponent(detail.run_id)}/download/${encodeURIComponent(articleName)}"
+                >
+                  Download
+                </a>
+              </div>
+            </section>
+          `);
+        } else if (artifactName) {
+          detailBlocks.push(`
+            <section class="detail-section">
+              <h4>Artifact</h4>
+              <p class="detail-text">${escapeHtml(artifactName)}</p>
+            </section>
+          `);
+        }
 
         return `
           <article class="stage-card stage-card--${stage.status} ${isExpanded ? "is-expanded" : ""}">
@@ -321,7 +526,6 @@
                   <strong>${escapeHtml(stage.label)}</strong>
                   <span>${escapeHtml(stage.agent)}</span>
                 </div>
-                <p class="stage-description">${escapeHtml(stage.description)}</p>
               </div>
               <div class="stage-summary">
                 <span class="stage-state">${statusLabel(stage.status)}</span>
@@ -330,109 +534,7 @@
             </button>
 
             <div class="stage-panel" ${isExpanded ? "" : "hidden"}>
-              <div class="detail-grid">
-                <div class="detail-box">
-                  <span>Status</span>
-                  <strong>${statusLabel(stage.status)}</strong>
-                </div>
-                <div class="detail-box">
-                  <span>Duration</span>
-                  <strong>${formatDuration(stage.duration_seconds)}</strong>
-                </div>
-                <div class="detail-box">
-                  <span>Artifact</span>
-                  <strong>${escapeHtml(artifactName || "None yet")}</strong>
-                </div>
-                <div class="detail-box">
-                  <span>Agent</span>
-                  <strong>${escapeHtml(stage.agent)}</strong>
-                </div>
-              </div>
-
-              ${
-                stage.latest_preview
-                  ? `
-                    <section class="detail-section">
-                      <h3>Latest preview</h3>
-                      <div class="detail-text">${escapeHtml(stage.latest_preview)}</div>
-                    </section>
-                  `
-                  : ""
-              }
-
-              ${
-                stage.latest_prompt
-                  ? `
-                    <section class="detail-section">
-                      <h3>Prompt summary</h3>
-                      <div class="detail-text">${escapeHtml(stage.latest_prompt)}</div>
-                    </section>
-                  `
-                  : ""
-              }
-
-              ${
-                traces.length
-                  ? `
-                    <section class="detail-section">
-                      <h3>What happened</h3>
-                      <ul class="trace-list">
-                        ${traces
-                          .map(
-                            (trace) => `
-                              <li class="trace-item">
-                                <strong>${escapeHtml(trace.message || "Stage update")}</strong>
-                                ${
-                                  trace.preview
-                                    ? `<span>${escapeHtml(truncate(trace.preview, 240))}</span>`
-                                    : ""
-                                }
-                              </li>
-                            `
-                          )
-                          .join("")}
-                      </ul>
-                    </section>
-                  `
-                  : ""
-              }
-
-              ${
-                stage.error
-                  ? `
-                    <section class="detail-section detail-section--error">
-                      <h3>Error</h3>
-                      <div class="detail-text">${escapeHtml(stage.error)}</div>
-                    </section>
-                  `
-                  : ""
-              }
-
-              ${
-                canExport
-                  ? `
-                    <section class="detail-section final-output">
-                      <div class="final-output-head">
-                        <div>
-                          <h3>Final blog</h3>
-                          <p>Export the markdown for the finished article.</p>
-                        </div>
-                        <a
-                          class="export-button"
-                          href="/api/runs/${encodeURIComponent(detail.run_id)}/download/${encodeURIComponent(articleName)}"
-                        >
-                          Export Markdown
-                        </a>
-                      </div>
-                      ${
-                        articlePreview
-                          ? `<pre class="article-preview">${escapeHtml(articlePreview)}</pre>`
-                          : ""
-                      }
-                    </section>
-                  `
-                  : ""
-              }
+              ${detailBlocks.join("") || '<p class="empty-state">Waiting for stage details...</p>'}
             </div>
           </article>
         `;
@@ -441,7 +543,7 @@
       function renderStages() {
         const detail = state.selectedRunDetail;
         if (!detail) {
-          els.stageList.innerHTML = '<p class="empty-state">Start a run to see the stage boxes here.</p>';
+          els.stageList.innerHTML = '<p class="empty-state">No run selected yet.</p>';
           return;
         }
 
@@ -451,7 +553,9 @@
         Array.from(document.querySelectorAll(".stage-toggle")).forEach((button) => {
           button.addEventListener("click", () => {
             const stageName = button.dataset.stage;
-            state.expandedStage = state.expandedStage === stageName ? null : stageName;
+            const nextExpanded = state.expandedStage === stageName ? null : stageName;
+            state.expandedStage = nextExpanded;
+            setStoredExpandedStage(state.selectedRunId, nextExpanded);
             renderStages();
           });
         });
@@ -460,6 +564,7 @@
       async function loadRunDetail(runId) {
         if (!runId) {
           state.selectedRunDetail = null;
+          state.expandedStage = null;
           return;
         }
 
@@ -467,11 +572,25 @@
           const detail = await requestJson(`/api/runs/${encodeURIComponent(runId)}`);
           state.selectedRunDetail = detail;
           const availableStages = detail.stage_views || [];
-          if (!state.expandedStage || !availableStages.some((stage) => stage.stage === state.expandedStage)) {
-            state.expandedStage = defaultExpandedStage(availableStages);
+          const storedStage = getStoredExpandedStage(runId);
+
+          if (storedStage === NO_EXPANDED_STAGE) {
+            state.expandedStage = null;
+            return;
+          }
+
+          if (storedStage && availableStages.some((stage) => stage.stage === storedStage)) {
+            state.expandedStage = storedStage;
+            return;
+          }
+
+          state.expandedStage = defaultExpandedStage(availableStages);
+          if (state.expandedStage) {
+            setStoredExpandedStage(runId, state.expandedStage);
           }
         } catch (error) {
           state.selectedRunDetail = null;
+          state.expandedStage = null;
           showFlash(normalizeErrorMessage(error), "error");
         }
       }
@@ -481,6 +600,7 @@
         renderRecentRuns();
         renderPipelineSummary();
         renderStages();
+        syncSidebarState();
       }
 
       async function loadDashboard() {
@@ -493,6 +613,7 @@
             (state.status.running && nextRunId === state.status.active_run_id);
 
           state.selectedRunId = nextRunId;
+          persistSelectedRunId();
 
           if (shouldReloadDetail) {
             await loadRunDetail(nextRunId);
@@ -506,16 +627,18 @@
 
       els.runNow.addEventListener("click", async () => {
         try {
-          showFlash("Starting pipeline run…");
+          showFlash("Starting pipeline run...");
           const payload = await requestJson("/api/runs/start", {
             method: "POST",
             body: JSON.stringify({ trigger: "manual" }),
           });
           state.status = payload;
           state.selectedRunId = payload.active_run_id || state.selectedRunId;
+          persistSelectedRunId();
           state.selectedRunDetail = null;
           showFlash("Pipeline run started.", "success");
           await loadDashboard();
+          closeSidebarIfDrawer();
         } catch (error) {
           showFlash(normalizeErrorMessage(error), "error");
         }
@@ -539,7 +662,7 @@
           return;
         }
         try {
-          showFlash("Resuming interrupted run…");
+          showFlash("Resuming interrupted run...");
           const payload = await requestJson(`/api/runs/${encodeURIComponent(state.selectedRunId)}/resume`, {
             method: "POST",
           });
@@ -547,15 +670,38 @@
           state.selectedRunDetail = null;
           showFlash("Run resumed.", "success");
           await loadDashboard();
+          closeSidebarIfDrawer();
         } catch (error) {
           showFlash(normalizeErrorMessage(error), "error");
         }
       });
 
       els.refresh.addEventListener("click", async () => {
-        showFlash("Refreshing…");
+        showFlash("Refreshing...");
         await loadDashboard();
         showFlash("Dashboard updated.");
+      });
+
+      els.sidebarToggle.addEventListener("click", () => {
+        setSidebarOpen(!state.sidebarOpen);
+      });
+
+      els.sidebarBackdrop.addEventListener("click", () => {
+        setSidebarOpen(false);
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          setSidebarOpen(false);
+        }
+      });
+
+      window.addEventListener("resize", () => {
+        if (!isDrawerMode()) {
+          setSidebarOpen(false);
+        } else {
+          syncSidebarState();
+        }
       });
 
       loadDashboard();
